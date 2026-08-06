@@ -1,0 +1,14 @@
+{
+  "name": "arch-backfill-tool",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongodb": "^6.3.0",
+    "playwright-core": "^1.44.0"
+  }
+}
