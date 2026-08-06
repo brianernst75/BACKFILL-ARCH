@@ -187,6 +187,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         // Attach each recording to the policy (Potentials)
         let policyAttached = 0;
         let policySkipped = 0;
+        let policyErrors = 0;
 
         for (const cdr of allCdrs) {
           // Ensure we have a recordsId
@@ -223,6 +224,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           } catch (err) {
             log(`[Backfill] ⚠ Attach failed for ${cdr.uniqueId}: ${err.message}`);
             activeRun.stats.errors++;
+            policyErrors++;
             // Store failure detail for Results page
             const db = await getDb();
             await db.collection("backfill_errors").insertOne({
@@ -243,6 +245,8 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         await markPolicyProcessed(runId, policy.id, status, {
           attached: policyAttached,
           skipped: policySkipped,
+          errorCount: policyErrors,
+          policyId: policy.id,
           policyName: policy.Deal_Name,
           contactName: contact?.Full_Name || `${contact?.First_Name || ""} ${contact?.Last_Name || ""}`.trim(),
           insuranceCompany: policy.Insurance_Company || null,
