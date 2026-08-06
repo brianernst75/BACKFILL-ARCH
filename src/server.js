@@ -69,6 +69,19 @@ app.post("/start", async (req, res) => {
   });
 });
 
+// ── Preview ──────────────────────────────────────────────────────────────────
+app.get("/preview", async (req, res) => {
+  const { startDate, endDate } = req.query;
+  if (!startDate || !endDate) return res.status(400).json({ error: "startDate and endDate required" });
+  try {
+    const { getSoldMAPoliciesByDateRange } = await import("./zoho.js");
+    const policies = await getSoldMAPoliciesByDateRange(startDate, endDate);
+    res.json({ count: policies.length, startDate, endDate });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Cancel ───────────────────────────────────────────────────────────────────
 app.post("/cancel", (req, res) => {
   cancelActiveRun();
@@ -188,6 +201,7 @@ app.get("/", (req, res) => {
         <label>Application Date End</label>
         <input type="date" id="endDate">
       </div>
+      <button class="btn btn-secondary" id="previewBtn" onclick="previewBackfill()">🔍 Preview</button>
       <button class="btn btn-primary" id="startBtn" onclick="startBackfill()">▶ Start</button>
       <button class="btn btn-danger" id="cancelBtn" onclick="cancelBackfill()" disabled>⛔ Stop</button>
     </div>
@@ -237,6 +251,27 @@ app.get("/", (req, res) => {
 <script>
 let evtSource = null;
 let isRunning = false;
+
+async function previewBackfill() {
+  const startDate = document.getElementById("startDate").value;
+  const endDate = document.getElementById("endDate").value;
+  if (!startDate || !endDate) { alert("Please select both dates."); return; }
+  const btn = document.getElementById("previewBtn");
+  btn.disabled = true;
+  btn.textContent = "Loading...";
+  try {
+    const res = await fetch("/preview?startDate=" + startDate + "&endDate=" + endDate);
+    const data = await res.json();
+    if (res.ok) {
+      alert("Found " + data.count + " MA policies with Application Date " + startDate + " to " + endDate);
+    } else {
+      alert("Error: " + (data.error || "Unknown"));
+    }
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = "🔍 Preview";
+  }
+}
 
 function connectSSE() {
   evtSource = new EventSource("/stream");
