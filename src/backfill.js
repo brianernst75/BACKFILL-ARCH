@@ -148,7 +148,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         // If no CDRs in cache, scrape Integritel directly (full history)
         if (allCdrs.length === 0) {
           log(`[Backfill] 🔍 ${policyLabel} — no cache hits, scraping Integritel...`);
-          const scrapeStart = "2020-01-01";
+          const scrapeStart = "2024-01-01";
           const scrapeEnd = new Date().toISOString().split("T")[0];
           for (const phone of phones) {
             try {
@@ -212,9 +212,8 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           }
 
           try {
-            const date = (cdr.dateTimeIso || "").split("T")[0];
-            const filename = `backfill_${date}_${cdr.uniqueId.replace(/\./g, "_")}.mp3`;
-            const result = await attachRecordingToZoho("Potentials", policy.id, cdr.uniqueId, filename, policy.Deal_Name, session);
+            // Pass null filename — let attachRecordingToZoho use the original filename from Integritel
+            const result = await attachRecordingToZoho("Potentials", policy.id, cdr.uniqueId, null, policy.Deal_Name, session);
             if (result.skipped) {
               policySkipped++;
             } else {
@@ -224,6 +223,16 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           } catch (err) {
             log(`[Backfill] ⚠ Attach failed for ${cdr.uniqueId}: ${err.message}`);
             activeRun.stats.errors++;
+            // Store failure detail for Results page
+            const db = await getDb();
+            await db.collection("backfill_errors").insertOne({
+              runId,
+              policyId: policy.id,
+              policyName: policy.Deal_Name,
+              uniqueId: cdr.uniqueId,
+              error: err.message,
+              failedAt: new Date(),
+            });
           }
         }
 

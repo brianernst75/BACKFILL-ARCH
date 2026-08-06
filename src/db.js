@@ -130,3 +130,19 @@ export async function getProcessedApplicationDates() {
   const result = await database.collection("backfill_progress").distinct("applicationDate");
   return result.filter(Boolean).sort().reverse();
 }
+
+/**
+ * Get all attachment errors for a given policyId.
+ */
+export async function getErrorsForPolicy(policyId) {
+  const database = await getDb();
+  return database.collection("backfill_errors").find({ policyId }).sort({ failedAt: -1 }).toArray();
+}
+
+/**
+ * Get all attachment errors for a given runId.
+ */
+export async function getErrorsForRun(runId) {
+  const database = await getDb();
+  return database.collection("backfill_errors").find({ runId }).sort({ failedAt: -1 }).toArray();
+}
