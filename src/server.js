@@ -1,6 +1,6 @@
 import express from "express";
 import { runBackfill, getActiveRun, cancelActiveRun } from "./backfill.js";
-import { getDb, getBackfillRuns, getPoliciesByApplicationDate, getPoliciesByRunId, getProcessedApplicationDates } from "./db.js";
+import { getBackfillRuns, getPoliciesByApplicationDate, getPoliciesByRunId, getProcessedApplicationDates } from "./db.js";
 
 const app = express();
 app.use(express.json());
@@ -12,16 +12,16 @@ const sseClients = new Set();
 
 function broadcastLog(msg) {
   for (const res of sseClients) {
-    try { res.write(`data: ${JSON.stringify({ type: "log", msg })}\n\n`); } catch (_) {}
+    try { res.write("data: " + JSON.stringify({ type: "log", msg }) + "\n\n"); } catch (_) {}
   }
 }
 function broadcastStats(stats) {
   for (const res of sseClients) {
-    try { res.write(`data: ${JSON.stringify({ type: "stats", stats })}\n\n`); } catch (_) {}
+    try { res.write("data: " + JSON.stringify({ type: "stats", stats }) + "\n\n"); } catch (_) {}
   }
 }
 
-// ── SSE ──────────────────────────────────────────────────────────────────────
+// SSE
 app.get("/stream", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -29,11 +29,11 @@ app.get("/stream", (req, res) => {
   res.flushHeaders();
   sseClients.add(res);
   const run = getActiveRun();
-  if (run) res.write(`data: ${JSON.stringify({ type: "status", run: sanitizeRun(run) })}\n\n`);
+  if (run) res.write("data: " + JSON.stringify({ type: "status", run: sanitizeRun(run) }) + "\n\n");
   req.on("close", () => sseClients.delete(res));
 });
 
-// ── Preview ───────────────────────────────────────────────────────────────────
+// Preview
 app.get("/preview", async (req, res) => {
   const { startDate, endDate } = req.query;
   if (!startDate || !endDate) return res.status(400).json({ error: "startDate and endDate required" });
@@ -46,553 +46,67 @@ app.get("/preview", async (req, res) => {
   }
 });
 
-// ── Start backfill ────────────────────────────────────────────────────────────
+// Start
 app.post("/start", async (req, res) => {
   const { startDate, endDate, resumeRunId } = req.body;
-  if (!startDate || !endDate) return res.status(400).json({ error: "startDate and endDate required (YYYY-MM-DD)" });
+  if (!startDate || !endDate) return res.status(400).json({ error: "startDate and endDate required" });
   const run = getActiveRun();
   if (run && !run.done) return res.status(409).json({ error: "A backfill is already running" });
-  res.json({ started: true, message: `Backfill started: ${startDate} → ${endDate}` });
+  res.json({ started: true });
   runBackfill({
     startDate, endDate, resumeRunId: resumeRunId || null,
     onLog: (msg) => {
       broadcastLog(msg);
-      const activeRun = getActiveRun();
-      if (activeRun?.stats) broadcastStats(activeRun.stats);
+      const r = getActiveRun();
+      if (r && r.stats) broadcastStats(r.stats);
     },
-  }).catch(err => broadcastLog(`[Backfill] 💥 ${err.message}`));
+  }).catch(err => broadcastLog("[Backfill] Fatal error: " + err.message));
 });
 
-// ── Cancel ────────────────────────────────────────────────────────────────────
-app.post("/cancel", (req, res) => {
-  cancelActiveRun();
-  res.json({ cancelled: true });
-});
+// Cancel
+app.post("/cancel", (req, res) => { cancelActiveRun(); res.json({ cancelled: true }); });
 
-// ── Status ────────────────────────────────────────────────────────────────────
+// Status
 app.get("/status", (req, res) => {
   const run = getActiveRun();
   res.json({ run: run ? sanitizeRun(run) : null });
 });
 
-// ── Run history ───────────────────────────────────────────────────────────────
+// Runs
 app.get("/runs", async (req, res) => {
-  try {
-    const runs = await getBackfillRuns();
-    res.json({ runs });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  try { res.json({ runs: await getBackfillRuns() }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Results by application date ───────────────────────────────────────────────
+// Results
 app.get("/results", async (req, res) => {
   const { date, runId } = req.query;
   try {
     let policies = [];
-    if (runId) {
-      policies = await getPoliciesByRunId(runId);
-    } else if (date) {
-      policies = await getPoliciesByApplicationDate(date);
-    }
+    if (runId) policies = await getPoliciesByRunId(runId);
+    else if (date) policies = await getPoliciesByApplicationDate(date);
     res.json({ policies });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Available application dates ───────────────────────────────────────────────
-app.get("/results/dates", async (req, res) => {
-  try {
-    const dates = await getProcessedApplicationDates();
-    res.json({ dates });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+// Config for UI
+app.get("/config", (req, res) => {
+  res.json({ zohoOrgId: ZOHO_ORG_ID });
 });
 
 function sanitizeRun(run) {
-  return {
-    runId: run.runId, startDate: run.startDate, endDate: run.endDate,
-    startedAt: run.startedAt, done: run.done, cancelled: run.cancelled, stats: run.stats,
-  };
+  return { runId: run.runId, startDate: run.startDate, endDate: run.endDate, startedAt: run.startedAt, done: run.done, cancelled: run.cancelled, stats: run.stats };
 }
 
-// ── Web UI ────────────────────────────────────────────────────────────────────
+// UI
 app.get("/", (req, res) => {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ARCH Backfill Tool</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
-  header { background: #1a1f2e; border-bottom: 1px solid #2d3748; padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
-  header h1 { font-size: 18px; font-weight: 600; color: #63b3ed; }
-  header span { font-size: 13px; color: #718096; }
-  nav { background: #1a1f2e; border-bottom: 1px solid #2d3748; display: flex; gap: 0; }
-  nav button { background: none; border: none; color: #718096; padding: 12px 20px; font-size: 13px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
-  nav button:hover { color: #e2e8f0; }
-  nav button.active { color: #63b3ed; border-bottom-color: #63b3ed; }
-  .tab { display: none; }
-  .tab.active { display: block; }
-  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
-  .card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
-  .card h2 { font-size: 14px; font-weight: 600; color: #a0aec0; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 16px; }
-  .form-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
-  .form-group { display: flex; flex-direction: column; gap: 6px; }
-  .form-group label { font-size: 12px; color: #718096; font-weight: 500; }
-  .form-group input, .form-group select { background: #0f1117; border: 1px solid #2d3748; color: #e2e8f0; padding: 8px 12px; border-radius: 6px; font-size: 14px; outline: none; }
-  .form-group input:focus, .form-group select:focus { border-color: #63b3ed; }
-  .btn { padding: 9px 20px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; border: none; transition: opacity 0.15s; }
-  .btn:hover { opacity: 0.85; }
-  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .btn-primary { background: #3182ce; color: #fff; }
-  .btn-danger { background: #e53e3e; color: #fff; }
-  .btn-secondary { background: #2d3748; color: #e2e8f0; }
-  .btn-green { background: #276749; color: #fff; }
-  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
-  .stat-box { background: #0f1117; border: 1px solid #2d3748; border-radius: 8px; padding: 14px; text-align: center; }
-  .stat-box .val { font-size: 28px; font-weight: 700; color: #63b3ed; }
-  .stat-box .lbl { font-size: 11px; color: #718096; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
-  .stat-box.green .val { color: #48bb78; }
-  .stat-box.yellow .val { color: #ecc94b; }
-  .stat-box.red .val { color: #fc8181; }
-  .progress-bar { background: #2d3748; border-radius: 999px; height: 8px; overflow: hidden; margin-top: 12px; }
-  .progress-fill { height: 100%; background: #3182ce; border-radius: 999px; transition: width 0.4s; }
-  #log { background: #0a0d14; border: 1px solid #2d3748; border-radius: 8px; padding: 14px; font-family: "Courier New", monospace; font-size: 12px; line-height: 1.6; height: 380px; overflow-y: auto; color: #a0aec0; }
-  #log .entry { white-space: pre-wrap; word-break: break-all; }
-  #log .entry.ok { color: #48bb78; }
-  #log .entry.warn { color: #ecc94b; }
-  #log .entry.err { color: #fc8181; }
-  #log .entry.info { color: #63b3ed; }
-  .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; }
-  .status-badge.running { background: #1a3a5c; color: #63b3ed; }
-  .status-badge.idle { background: #1a2e1a; color: #48bb78; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-  .dot.pulse { animation: pulse 1.2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; padding: 8px 10px; color: #718096; font-weight: 500; border-bottom: 1px solid #2d3748; font-size: 11px; text-transform: uppercase; }
-  td { padding: 8px 10px; border-bottom: 1px solid #1a1f2e; color: #e2e8f0; }
-  tr:hover td { background: #151a27; }
-  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
-  .tag.complete { background: #1a3a1a; color: #48bb78; }
-  .tag.done { background: #1a3a1a; color: #48bb78; }
-  .tag.running { background: #1a3a5c; color: #63b3ed; }
-  .tag.cancelled { background: #2d3748; color: #a0aec0; }
-  .tag.error { background: #3a1a1a; color: #fc8181; }
-  .tag.skipped { background: #2d2a1a; color: #ecc94b; }
-  .tag.no_recordings { background: #2d3748; color: #a0aec0; }
-  .resume-btn { font-size: 11px; padding: 3px 8px; }
-  .zoho-link { color: #63b3ed; text-decoration: none; font-weight: 500; }
-  .zoho-link:hover { text-decoration: underline; }
-  .results-filter { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 16px; flex-wrap: wrap; }
-  .count-badge { background: #1a3a5c; color: #63b3ed; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
-  .count-badge.has-recordings { background: #1a3a1a; color: #48bb78; }
-  .count-badge.no-recordings { background: #2d3748; color: #718096; }
-</style>
-</head>
-<body>
-<header>
-  <h1>ARCH Backfill Tool</h1>
-  <span>MA Policy Recording Backfill — Standalone</span>
-  <div style="margin-left:auto;" id="statusBadge">
-    <span class="status-badge idle"><span class="dot"></span>Idle</span>
-  </div>
-</header>
-
-<nav>
-  <button class="active" onclick="showTab('backfill')">Backfill</button>
-  <button onclick="showTab('results')">Results</button>
-  <button onclick="showTab('history')">Run History</button>
-</nav>
-
-<div class="container">
-
-<!-- ── BACKFILL TAB ── -->
-<div id="tab-backfill" class="tab active">
-  <div class="card">
-    <h2>Start Backfill</h2>
-    <div class="form-row">
-      <div class="form-group">
-        <label>Application Date Start</label>
-        <input type="date" id="startDate">
-      </div>
-      <div class="form-group">
-        <label>Application Date End</label>
-        <input type="date" id="endDate">
-      </div>
-      <button class="btn btn-secondary" id="previewBtn" onclick="previewBackfill()">🔍 Preview</button>
-      <button class="btn btn-primary" id="startBtn" onclick="startBackfill()">▶ Start</button>
-      <button class="btn btn-danger" id="cancelBtn" onclick="cancelBackfill()" disabled>⛔ Stop</button>
-    </div>
-    <div id="progressWrap" style="display:none; margin-top:16px;">
-      <div style="font-size:12px; color:#718096; margin-bottom:6px;" id="progressLabel">Processing...</div>
-      <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Current Run Stats</h2>
-    <div class="stats-grid">
-      <div class="stat-box"><div class="val" id="sTotal">—</div><div class="lbl">Total</div></div>
-      <div class="stat-box"><div class="val" id="sProcessed">—</div><div class="lbl">Processed</div></div>
-      <div class="stat-box green"><div class="val" id="sAttached">—</div><div class="lbl">Attached</div></div>
-      <div class="stat-box yellow"><div class="val" id="sSkipped">—</div><div class="lbl">Skipped</div></div>
-      <div class="stat-box yellow"><div class="val" id="sNoRec">—</div><div class="lbl">No Recordings</div></div>
-      <div class="stat-box yellow"><div class="val" id="sNoPhone">—</div><div class="lbl">No Phone</div></div>
-      <div class="stat-box red"><div class="val" id="sErrors">—</div><div class="lbl">Errors</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2 style="display:flex; justify-content:space-between; align-items:center;">
-      Live Log
-      <button class="btn btn-secondary" style="font-size:11px; padding:4px 10px;" onclick="clearLog()">Clear</button>
-    </h2>
-    <div id="log"></div>
-  </div>
-</div>
-
-<!-- ── RESULTS TAB ── -->
-<div id="tab-results" class="tab">
-  <div class="card">
-    <h2>Search Results by Application Date</h2>
-    <div class="results-filter">
-      <div class="form-group">
-        <label>Application Date</label>
-        <input type="date" id="resultsDate" onchange="loadResults()">
-      </div>
-      <div class="form-group">
-        <label>Or Filter by Run</label>
-        <select id="resultsRunId" onchange="loadResultsByRun()">
-          <option value="">— Select a run —</option>
-        </select>
-      </div>
-      <button class="btn btn-secondary" onclick="clearResultsFilter()">Clear</button>
-    </div>
-    <div id="resultsInfo" style="font-size:12px; color:#718096; margin-bottom:12px;"></div>
-    <div style="overflow-x:auto;">
-      <table>
-        <thead><tr>
-          <th>Client</th>
-          <th>Insurance Co</th>
-          <th>App Date</th>
-          <th>Effective Date</th>
-          <th>Stage</th>
-          <th>Agent</th>
-          <th>Recordings</th>
-          <th>Status</th>
-          <th>Processed</th>
-        </tr></thead>
-        <tbody id="resultsBody">
-          <tr><td colspan="9" style="color:#718096; text-align:center; padding:30px;">Select an application date or run above to view results.</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-<!-- ── HISTORY TAB ── -->
-<div id="tab-history" class="tab">
-  <div class="card">
-    <h2>Run History</h2>
-    <table>
-      <thead><tr>
-        <th>Date Range</th>
-        <th>Started</th>
-        <th>Finished</th>
-        <th>Elapsed</th>
-        <th>Status</th>
-        <th>Total</th>
-        <th>Attached</th>
-        <th>Errors</th>
-        <th></th>
-      </tr></thead>
-      <tbody id="historyBody">
-        <tr><td colspan="9" style="color:#718096; text-align:center; padding:20px;">Loading...</td></tr>
-      </tbody>
-    </table>
-  </div>
-</div>
-
-</div><!-- /container -->
-
-<script>
-const ZOHO_ORG_ID = "` + ZOHO_ORG_ID + `";
-
-function zohoUrl(zohoId) {
-  return "https://crm.zoho.com/crm/org" + ZOHO_ORG_ID + "/tab/Potentials/" + zohoId;
-}
-
-// ── Tab navigation ────────────────────────────────────────────────────────────
-function showTab(name) {
-  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-  document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
-  document.getElementById("tab-" + name).classList.add("active");
-  document.querySelectorAll("nav button")[["backfill","results","history"].indexOf(name)].classList.add("active");
-  if (name === "history") loadHistory();
-  if (name === "results") loadRunsForResultsFilter();
-}
-
-// ── SSE ───────────────────────────────────────────────────────────────────────
-let evtSource = null;
-let isRunning = false;
-
-function connectSSE() {
-  evtSource = new EventSource("/stream");
-  evtSource.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-    if (data.type === "log") appendLog(data.msg);
-    if (data.type === "stats") updateStats(data.stats);
-    if (data.type === "status") { if (data.run && !data.run.done) setRunning(true); }
-  };
-  evtSource.onerror = () => setTimeout(connectSSE, 3000);
-}
-
-function appendLog(msg) {
-  const log = document.getElementById("log");
-  const div = document.createElement("div");
-  div.className = "entry " + classForMsg(msg);
-  div.textContent = msg;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-}
-
-function classForMsg(msg) {
-  if (msg.includes("✅") || msg.includes("Complete")) return "ok";
-  if (msg.includes("❌") || msg.includes("💥") || msg.includes("Fatal")) return "err";
-  if (msg.includes("⚠") || msg.includes("⛔") || msg.includes("Cancelled")) return "warn";
-  if (msg.includes("📊") || msg.includes("▶") || msg.includes("🔍")) return "info";
-  return "";
-}
-
-function clearLog() { document.getElementById("log").innerHTML = ""; }
-
-function updateStats(stats) {
-  if (!stats) return;
-  document.getElementById("sTotal").textContent = stats.total ?? "—";
-  document.getElementById("sProcessed").textContent = stats.processed ?? "—";
-  document.getElementById("sAttached").textContent = stats.attached ?? "—";
-  document.getElementById("sSkipped").textContent = stats.skipped ?? "—";
-  document.getElementById("sNoRec").textContent = stats.noRecordings ?? "—";
-  document.getElementById("sNoPhone").textContent = stats.noPhone ?? "—";
-  document.getElementById("sErrors").textContent = stats.errors ?? "—";
-  if (stats.total > 0) {
-    const pct = Math.round((stats.processed / stats.total) * 100);
-    document.getElementById("progressFill").style.width = pct + "%";
-    document.getElementById("progressLabel").textContent = stats.processed + " of " + stats.total + " processed (" + pct + "%)";
-    document.getElementById("progressWrap").style.display = "block";
-  }
-}
-
-function setRunning(running) {
-  isRunning = running;
-  document.getElementById("startBtn").disabled = running;
-  document.getElementById("cancelBtn").disabled = !running;
-  const badge = document.getElementById("statusBadge");
-  badge.innerHTML = running
-    ? '<span class="status-badge running"><span class="dot pulse"></span>Running</span>'
-    : '<span class="status-badge idle"><span class="dot"></span>Idle</span>';
-}
-
-// ── Preview ───────────────────────────────────────────────────────────────────
-async function previewBackfill() {
-  const startDate = document.getElementById("startDate").value;
-  const endDate = document.getElementById("endDate").value;
-  if (!startDate || !endDate) { alert("Please select both dates."); return; }
-  const btn = document.getElementById("previewBtn");
-  btn.disabled = true; btn.textContent = "Loading...";
-  try {
-    const res = await fetch("/preview?startDate=" + startDate + "&endDate=" + endDate);
-    const data = await res.json();
-    if (res.ok) alert("Found " + data.count + " MA policies with Application Date " + startDate + " to " + endDate);
-    else alert("Error: " + (data.error || "Unknown"));
-  } finally { btn.disabled = false; btn.innerHTML = "🔍 Preview"; }
-}
-
-// ── Start/Cancel ──────────────────────────────────────────────────────────────
-async function startBackfill() {
-  const startDate = document.getElementById("startDate").value;
-  const endDate = document.getElementById("endDate").value;
-  if (!startDate || !endDate) { alert("Please select both dates."); return; }
-  if (startDate > endDate) { alert("Start date must be before end date."); return; }
-  clearLog(); setRunning(true);
-  appendLog("[UI] Starting backfill: " + startDate + " → " + endDate);
-  const res = await fetch("/start", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ startDate, endDate }),
-  });
-  const data = await res.json();
-  if (!res.ok) { appendLog("[UI] Error: " + (data.error || "Unknown error")); setRunning(false); return; }
-  pollStatus();
-}
-
-async function cancelBackfill() {
-  await fetch("/cancel", { method: "POST" });
-  appendLog("[UI] Stop requested...");
-}
-
-async function pollStatus() {
-  const check = async () => {
-    const res = await fetch("/status");
-    const data = await res.json();
-    if (data.run) {
-      updateStats(data.run.stats);
-      if (data.run.done) { setRunning(false); loadHistory(); return; }
-    }
-    if (isRunning) setTimeout(check, 3000);
-  };
-  setTimeout(check, 2000);
-}
-
-// ── Results ───────────────────────────────────────────────────────────────────
-async function loadResults() {
-  const date = document.getElementById("resultsDate").value;
-  if (!date) return;
-  document.getElementById("resultsRunId").value = "";
-  await fetchAndRenderResults("/results?date=" + date, "Application Date: " + date);
-}
-
-async function loadResultsByRun() {
-  const runId = document.getElementById("resultsRunId").value;
-  if (!runId) return;
-  document.getElementById("resultsDate").value = "";
-  await fetchAndRenderResults("/results?runId=" + runId, "Run: " + runId.slice(0,8) + "...");
-}
-
-async function fetchAndRenderResults(url, label) {
-  const tbody = document.getElementById("resultsBody");
-  tbody.innerHTML = '<tr><td colspan="9" style="color:#718096; text-align:center; padding:20px;">Loading...</td></tr>';
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-    const policies = data.policies || [];
-    document.getElementById("resultsInfo").textContent = label + " — " + policies.length + " policies";
-    if (policies.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" style="color:#718096; text-align:center; padding:20px;">No results found.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = policies.map(p => {
-      const recCount = p.attached || 0;
-      const recBadge = recCount > 0
-        ? '<span class="count-badge has-recordings">' + recCount + ' recording' + (recCount !== 1 ? 's' : '') + '</span>'
-        : '<span class="count-badge no-recordings">none</span>';
-      const nameCell = p.zohoId
-        ? '<a class="zoho-link" href="' + zohoUrl(p.zohoId) + '" target="_blank">' + (p.contactName || p.policyName || "—") + '</a>'
-        : (p.contactName || p.policyName || "—");
-      const processedAt = p.processedAt ? new Date(p.processedAt).toLocaleString() : "—";
-      return '<tr>' +
-        '<td>' + nameCell + '</td>' +
-        '<td>' + (p.insuranceCompany || "—") + '</td>' +
-        '<td>' + (p.applicationDate || "—") + '</td>' +
-        '<td>' + (p.effectiveDate || "—") + '</td>' +
-        '<td>' + (p.stage || "—") + '</td>' +
-        '<td>' + (p.agent || "—") + '</td>' +
-        '<td>' + recBadge + '</td>' +
-        '<td><span class="tag ' + (p.status || "") + '">' + (p.status || "—") + '</span></td>' +
-        '<td>' + processedAt + '</td>' +
-        '</tr>';
-    }).join("");
-  } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="9" style="color:#fc8181; text-align:center; padding:20px;">Error: ' + err.message + '</td></tr>';
-  }
-}
-
-function clearResultsFilter() {
-  document.getElementById("resultsDate").value = "";
-  document.getElementById("resultsRunId").value = "";
-  document.getElementById("resultsInfo").textContent = "";
-  document.getElementById("resultsBody").innerHTML = '<tr><td colspan="9" style="color:#718096; text-align:center; padding:30px;">Select an application date or run above to view results.</td></tr>';
-}
-
-async function loadRunsForResultsFilter() {
-  const res = await fetch("/runs");
-  const data = await res.json();
-  const sel = document.getElementById("resultsRunId");
-  sel.innerHTML = '<option value="">— Select a run —</option>';
-  (data.runs || []).forEach(r => {
-    const opt = document.createElement("option");
-    opt.value = r.runId;
-    opt.textContent = (r.startDate || "?") + " → " + (r.endDate || "?") + " (" + (r.status || "?") + ") " + (r.startedAt ? new Date(r.startedAt).toLocaleDateString() : "");
-    sel.appendChild(opt);
-  });
-}
-
-// ── History ───────────────────────────────────────────────────────────────────
-async function loadHistory() {
-  const res = await fetch("/runs");
-  const data = await res.json();
-  const tbody = document.getElementById("historyBody");
-  if (!data.runs || data.runs.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="color:#718096; text-align:center; padding:20px;">No runs yet</td></tr>';
-    return;
-  }
-  tbody.innerHTML = data.runs.map(r => {
-    const started = r.startedAt ? new Date(r.startedAt).toLocaleString() : "—";
-    const finished = r.finishedAt ? new Date(r.finishedAt).toLocaleString() : "—";
-    let elapsed = "—";
-    if (r.startedAt && r.finishedAt) {
-      const ms = new Date(r.finishedAt) - new Date(r.startedAt);
-      const mins = Math.floor(ms / 60000);
-      const secs = Math.floor((ms % 60000) / 1000);
-      elapsed = mins > 0 ? mins + "m " + secs + "s" : secs + "s";
-    }
-    const s = r.stats || {};
-    const resumeBtn = (r.status === "cancelled" || r.status === "error")
-      ? '<button class="btn btn-secondary resume-btn" onclick="resumeRun(\'' + r.runId + '\',\'' + r.startDate + '\',\'' + r.endDate + '\')">↩ Resume</button>'
-      : '<button class="btn btn-secondary resume-btn" onclick="viewRunResults(\'' + r.runId + '\')">View</button>';
-    return '<tr>' +
-      '<td>' + (r.startDate || "?") + ' → ' + (r.endDate || "?") + '</td>' +
-      '<td>' + started + '</td>' +
-      '<td>' + finished + '</td>' +
-      '<td>' + elapsed + '</td>' +
-      '<td><span class="tag ' + (r.status || "") + '">' + (r.status || "—") + '</span></td>' +
-      '<td>' + (s.total ?? "—") + '</td>' +
-      '<td>' + (s.attached ?? "—") + '</td>' +
-      '<td>' + (s.errors ?? "—") + '</td>' +
-      '<td>' + resumeBtn + '</td>' +
-      '</tr>';
-  }).join("");
-}
-
-function viewRunResults(runId) {
-  showTab("results");
-  document.getElementById("resultsRunId").value = runId;
-  loadResultsByRun();
-}
-
-async function resumeRun(runId, startDate, endDate) {
-  if (!confirm("Resume this run? It will skip already-processed policies.")) return;
-  showTab("backfill");
-  document.getElementById("startDate").value = startDate;
-  document.getElementById("endDate").value = endDate;
-  clearLog(); setRunning(true);
-  appendLog("[UI] Resuming run " + runId);
-  const res = await fetch("/start", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ startDate, endDate, resumeRunId: runId }),
-  });
-  const data = await res.json();
-  if (!res.ok) { appendLog("[UI] Error: " + (data.error || "Unknown")); setRunning(false); return; }
-  pollStatus();
-}
-
-// ── Init ──────────────────────────────────────────────────────────────────────
-connectSSE();
-
-const today = new Date();
-const sixMonthsAgo = new Date(today);
-sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-document.getElementById("endDate").value = today.toISOString().split("T")[0];
-document.getElementById("startDate").value = sixMonthsAgo.toISOString().split("T")[0];
-</script>
-</body>
-</html>`);
+  res.setHeader("Content-Type", "text/html");
+  res.end(getHTML());
 });
+
+function getHTML() {
+  return '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n<title>ARCH Backfill Tool</title>\n<style>\n* { box-sizing: border-box; margin: 0; padding: 0; }\nbody { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }\nheader { background: #1a1f2e; border-bottom: 1px solid #2d3748; padding: 16px 24px; display: flex; align-items: center; gap: 12px; }\nheader h1 { font-size: 18px; font-weight: 600; color: #63b3ed; }\nheader span { font-size: 13px; color: #718096; }\nnav { background: #1a1f2e; border-bottom: 1px solid #2d3748; display: flex; }\nnav button { background: none; border: none; color: #718096; padding: 12px 20px; font-size: 13px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }\nnav button:hover { color: #e2e8f0; }\nnav button.active { color: #63b3ed; border-bottom-color: #63b3ed; }\n.tab { display: none; }\n.tab.active { display: block; }\n.container { max-width: 1200px; margin: 0 auto; padding: 24px; }\n.card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 10px; padding: 20px; margin-bottom: 20px; }\n.card h2 { font-size: 14px; font-weight: 600; color: #a0aec0; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 16px; }\n.form-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }\n.form-group { display: flex; flex-direction: column; gap: 6px; }\n.form-group label { font-size: 12px; color: #718096; font-weight: 500; }\n.form-group input, .form-group select { background: #0f1117; border: 1px solid #2d3748; color: #e2e8f0; padding: 8px 12px; border-radius: 6px; font-size: 14px; outline: none; }\n.form-group input:focus, .form-group select:focus { border-color: #63b3ed; }\n.btn { padding: 9px 20px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; border: none; transition: opacity 0.15s; }\n.btn:hover { opacity: 0.85; }\n.btn:disabled { opacity: 0.4; cursor: not-allowed; }\n.btn-primary { background: #3182ce; color: #fff; }\n.btn-danger { background: #e53e3e; color: #fff; }\n.btn-secondary { background: #2d3748; color: #e2e8f0; }\n.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }\n.stat-box { background: #0f1117; border: 1px solid #2d3748; border-radius: 8px; padding: 14px; text-align: center; }\n.stat-box .val { font-size: 28px; font-weight: 700; color: #63b3ed; }\n.stat-box .lbl { font-size: 11px; color: #718096; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }\n.stat-box.green .val { color: #48bb78; }\n.stat-box.yellow .val { color: #ecc94b; }\n.stat-box.red .val { color: #fc8181; }\n.progress-bar { background: #2d3748; border-radius: 999px; height: 8px; overflow: hidden; margin-top: 12px; }\n.progress-fill { height: 100%; background: #3182ce; border-radius: 999px; transition: width 0.4s; }\n#log { background: #0a0d14; border: 1px solid #2d3748; border-radius: 8px; padding: 14px; font-family: "Courier New", monospace; font-size: 12px; line-height: 1.6; height: 380px; overflow-y: auto; color: #a0aec0; }\n#log .entry { white-space: pre-wrap; word-break: break-all; }\n#log .entry.ok { color: #48bb78; }\n#log .entry.warn { color: #ecc94b; }\n#log .entry.err { color: #fc8181; }\n#log .entry.info { color: #63b3ed; }\n.status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; }\n.status-badge.running { background: #1a3a5c; color: #63b3ed; }\n.status-badge.idle { background: #1a2e1a; color: #48bb78; }\n.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }\n.dot.pulse { animation: pulse 1.2s infinite; }\n@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }\ntable { width: 100%; border-collapse: collapse; font-size: 13px; }\nth { text-align: left; padding: 8px 10px; color: #718096; font-weight: 500; border-bottom: 1px solid #2d3748; font-size: 11px; text-transform: uppercase; }\ntd { padding: 8px 10px; border-bottom: 1px solid #1a1f2e; color: #e2e8f0; }\ntr:hover td { background: #151a27; }\n.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }\n.tag.complete, .tag.done { background: #1a3a1a; color: #48bb78; }\n.tag.running { background: #1a3a5c; color: #63b3ed; }\n.tag.cancelled, .tag.no_recordings { background: #2d3748; color: #a0aec0; }\n.tag.error { background: #3a1a1a; color: #fc8181; }\n.tag.skipped { background: #2d2a1a; color: #ecc94b; }\n.resume-btn { font-size: 11px; padding: 3px 8px; }\n.zoho-link { color: #63b3ed; text-decoration: none; font-weight: 500; }\n.zoho-link:hover { text-decoration: underline; }\n.count-badge { border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 600; }\n.count-badge.has { background: #1a3a1a; color: #48bb78; }\n.count-badge.none { background: #2d3748; color: #718096; }\n</style>\n</head>\n<body>\n<header>\n  <h1>ARCH Backfill Tool</h1>\n  <span>MA Policy Recording Backfill</span>\n  <div style="margin-left:auto;" id="statusBadge"><span class="status-badge idle"><span class="dot"></span>Idle</span></div>\n</header>\n<nav>\n  <button class="active" onclick="showTab(\'backfill\')">Backfill</button>\n  <button onclick="showTab(\'results\')">Results</button>\n  <button onclick="showTab(\'history\')">Run History</button>\n</nav>\n<div class="container">\n\n<!-- BACKFILL TAB -->\n<div id="tab-backfill" class="tab active">\n  <div class="card">\n    <h2>Start Backfill</h2>\n    <div class="form-row">\n      <div class="form-group"><label>Application Date Start</label><input type="date" id="startDate"></div>\n      <div class="form-group"><label>Application Date End</label><input type="date" id="endDate"></div>\n      <button class="btn btn-secondary" id="previewBtn" onclick="previewBackfill()">Preview</button>\n      <button class="btn btn-primary" id="startBtn" onclick="startBackfill()">Start</button>\n      <button class="btn btn-danger" id="cancelBtn" onclick="cancelBackfill()" disabled>Stop</button>\n    </div>\n    <div id="progressWrap" style="display:none;margin-top:16px;">\n      <div style="font-size:12px;color:#718096;margin-bottom:6px;" id="progressLabel">Processing...</div>\n      <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>\n    </div>\n  </div>\n  <div class="card">\n    <h2>Current Run Stats</h2>\n    <div class="stats-grid">\n      <div class="stat-box"><div class="val" id="sTotal">-</div><div class="lbl">Total</div></div>\n      <div class="stat-box"><div class="val" id="sProcessed">-</div><div class="lbl">Processed</div></div>\n      <div class="stat-box green"><div class="val" id="sAttached">-</div><div class="lbl">Attached</div></div>\n      <div class="stat-box yellow"><div class="val" id="sSkipped">-</div><div class="lbl">Skipped</div></div>\n      <div class="stat-box yellow"><div class="val" id="sNoRec">-</div><div class="lbl">No Recordings</div></div>\n      <div class="stat-box yellow"><div class="val" id="sNoPhone">-</div><div class="lbl">No Phone</div></div>\n      <div class="stat-box red"><div class="val" id="sErrors">-</div><div class="lbl">Errors</div></div>\n    </div>\n  </div>\n  <div class="card">\n    <h2 style="display:flex;justify-content:space-between;align-items:center;">Live Log <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px;" onclick="clearLog()">Clear</button></h2>\n    <div id="log"></div>\n  </div>\n</div>\n\n<!-- RESULTS TAB -->\n<div id="tab-results" class="tab">\n  <div class="card">\n    <h2>Results by Application Date</h2>\n    <div class="form-row" style="margin-bottom:16px;">\n      <div class="form-group"><label>Application Date</label><input type="date" id="resultsDate" onchange="loadResults()"></div>\n      <div class="form-group"><label>Or Filter by Run</label><select id="resultsRunId" onchange="loadResultsByRun()"><option value="">- Select a run -</option></select></div>\n      <button class="btn btn-secondary" onclick="clearResultsFilter()">Clear</button>\n    </div>\n    <div id="resultsInfo" style="font-size:12px;color:#718096;margin-bottom:12px;"></div>\n    <div style="overflow-x:auto;">\n      <table>\n        <thead><tr><th>Client</th><th>Insurance Co</th><th>App Date</th><th>Effective Date</th><th>Stage</th><th>Agent</th><th>Recordings</th><th>Status</th><th>Processed</th></tr></thead>\n        <tbody id="resultsBody"><tr><td colspan="9" style="color:#718096;text-align:center;padding:30px;">Select a date or run above.</td></tr></tbody>\n      </table>\n    </div>\n  </div>\n</div>\n\n<!-- HISTORY TAB -->\n<div id="tab-history" class="tab">\n  <div class="card">\n    <h2>Run History</h2>\n    <table>\n      <thead><tr><th>Date Range</th><th>Started</th><th>Finished</th><th>Elapsed</th><th>Status</th><th>Total</th><th>Attached</th><th>Errors</th><th></th></tr></thead>\n      <tbody id="historyBody"><tr><td colspan="9" style="color:#718096;text-align:center;padding:20px;">Loading...</td></tr></tbody>\n    </table>\n  </div>\n</div>\n\n</div>\n<script>\nvar ZOHO_ORG_ID = "";\nfetch("/config").then(function(r){return r.json();}).then(function(d){ZOHO_ORG_ID=d.zohoOrgId||"";});\n\nfunction zohoUrl(id) { return "https://crm.zoho.com/crm/org"+ZOHO_ORG_ID+"/tab/Potentials/"+id; }\n\nfunction showTab(name) {\n  document.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active");});\n  document.querySelectorAll("nav button").forEach(function(b){b.classList.remove("active");});\n  document.getElementById("tab-"+name).classList.add("active");\n  var tabs=["backfill","results","history"];\n  document.querySelectorAll("nav button")[tabs.indexOf(name)].classList.add("active");\n  if(name==="history") loadHistory();\n  if(name==="results") loadRunsForResultsFilter();\n}\n\nvar evtSource=null, isRunning=false;\nfunction connectSSE(){\n  evtSource=new EventSource("/stream");\n  evtSource.onmessage=function(e){\n    var d=JSON.parse(e.data);\n    if(d.type==="log") appendLog(d.msg);\n    if(d.type==="stats") updateStats(d.stats);\n    if(d.type==="status"&&d.run&&!d.run.done) setRunning(true);\n  };\n  evtSource.onerror=function(){setTimeout(connectSSE,3000);};\n}\n\nfunction appendLog(msg){\n  var log=document.getElementById("log");\n  var div=document.createElement("div");\n  div.className="entry "+classForMsg(msg);\n  div.textContent=msg;\n  log.appendChild(div);\n  log.scrollTop=log.scrollHeight;\n}\nfunction classForMsg(msg){\n  if(msg.indexOf("Complete")>=0) return "ok";\n  if(msg.indexOf("Fatal")>=0||msg.indexOf("error")>=0) return "err";\n  if(msg.indexOf("Cancelled")>=0||msg.indexOf("Warning")>=0) return "warn";\n  if(msg.indexOf("Progress")>=0||msg.indexOf("Starting")>=0||msg.indexOf("Found")>=0) return "info";\n  return "";\n}\nfunction clearLog(){document.getElementById("log").innerHTML="";}\n\nfunction updateStats(s){\n  if(!s) return;\n  document.getElementById("sTotal").textContent=s.total!=null?s.total:"-";\n  document.getElementById("sProcessed").textContent=s.processed!=null?s.processed:"-";\n  document.getElementById("sAttached").textContent=s.attached!=null?s.attached:"-";\n  document.getElementById("sSkipped").textContent=s.skipped!=null?s.skipped:"-";\n  document.getElementById("sNoRec").textContent=s.noRecordings!=null?s.noRecordings:"-";\n  document.getElementById("sNoPhone").textContent=s.noPhone!=null?s.noPhone:"-";\n  document.getElementById("sErrors").textContent=s.errors!=null?s.errors:"-";\n  if(s.total>0){\n    var pct=Math.round((s.processed/s.total)*100);\n    document.getElementById("progressFill").style.width=pct+"%";\n    document.getElementById("progressLabel").textContent=s.processed+" of "+s.total+" processed ("+pct+"%)";\n    document.getElementById("progressWrap").style.display="block";\n  }\n}\n\nfunction setRunning(running){\n  isRunning=running;\n  document.getElementById("startBtn").disabled=running;\n  document.getElementById("cancelBtn").disabled=!running;\n  document.getElementById("statusBadge").innerHTML=running\n    ?"<span class=\\"status-badge running\\"><span class=\\"dot pulse\\"></span>Running</span>"\n    :"<span class=\\"status-badge idle\\"><span class=\\"dot\\"></span>Idle</span>";\n}\n\nfunction previewBackfill(){\n  var s=document.getElementById("startDate").value;\n  var e=document.getElementById("endDate").value;\n  if(!s||!e){alert("Please select both dates.");return;}\n  var btn=document.getElementById("previewBtn");\n  btn.disabled=true; btn.textContent="Loading...";\n  fetch("/preview?startDate="+s+"&endDate="+e)\n    .then(function(r){return r.json();})\n    .then(function(d){\n      btn.disabled=false; btn.textContent="Preview";\n      if(d.count!=null) alert("Found "+d.count+" MA policies ("+s+" to "+e+")");\n      else alert("Error: "+(d.error||"Unknown"));\n    }).catch(function(err){btn.disabled=false;btn.textContent="Preview";alert("Error: "+err.message);});\n}\n\nfunction startBackfill(){\n  var s=document.getElementById("startDate").value;\n  var e=document.getElementById("endDate").value;\n  if(!s||!e){alert("Please select both dates.");return;}\n  if(s>e){alert("Start date must be before end date.");return;}\n  clearLog(); setRunning(true);\n  appendLog("[UI] Starting backfill: "+s+" to "+e);\n  fetch("/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({startDate:s,endDate:e})})\n    .then(function(r){return r.json();})\n    .then(function(d){\n      if(d.error){appendLog("[UI] Error: "+d.error);setRunning(false);return;}\n      pollStatus();\n    }).catch(function(err){appendLog("[UI] Error: "+err.message);setRunning(false);});\n}\n\nfunction cancelBackfill(){\n  fetch("/cancel",{method:"POST"});\n  appendLog("[UI] Stop requested...");\n}\n\nfunction pollStatus(){\n  setTimeout(function check(){\n    fetch("/status").then(function(r){return r.json();}).then(function(d){\n      if(d.run){\n        updateStats(d.run.stats);\n        if(d.run.done){setRunning(false);loadHistory();return;}\n      }\n      if(isRunning) setTimeout(check,3000);\n    });\n  },2000);\n}\n\nfunction loadResults(){\n  var date=document.getElementById("resultsDate").value;\n  if(!date) return;\n  document.getElementById("resultsRunId").value="";\n  fetchResults("/results?date="+date,"Application Date: "+date);\n}\nfunction loadResultsByRun(){\n  var runId=document.getElementById("resultsRunId").value;\n  if(!runId) return;\n  document.getElementById("resultsDate").value="";\n  fetchResults("/results?runId="+runId,"Run: "+runId.slice(0,8)+"...");\n}\nfunction clearResultsFilter(){\n  document.getElementById("resultsDate").value="";\n  document.getElementById("resultsRunId").value="";\n  document.getElementById("resultsInfo").textContent="";\n  document.getElementById("resultsBody").innerHTML="<tr><td colspan=\\"9\\" style=\\"color:#718096;text-align:center;padding:30px;\\">Select a date or run above.</td></tr>";\n}\nfunction fetchResults(url,label){\n  var tbody=document.getElementById("resultsBody");\n  tbody.innerHTML="<tr><td colspan=\\"9\\" style=\\"color:#718096;text-align:center;padding:20px;\\">Loading...</td></tr>";\n  fetch(url).then(function(r){return r.json();}).then(function(d){\n    var policies=d.policies||[];\n    document.getElementById("resultsInfo").textContent=label+" - "+policies.length+" policies";\n    if(policies.length===0){tbody.innerHTML="<tr><td colspan=\\"9\\" style=\\"color:#718096;text-align:center;padding:20px;\\">No results found.</td></tr>";return;}\n    tbody.innerHTML=policies.map(function(p){\n      var rec=p.attached||0;\n      var badge=rec>0?"<span class=\\"count-badge has\\">"+rec+" recording"+(rec!==1?"s":"")+"</span>":"<span class=\\"count-badge none\\">none</span>";\n      var name=p.zohoId?"<a class=\\"zoho-link\\" href=\\""+zohoUrl(p.zohoId)+"\\" target=\\"_blank\\">"+(p.contactName||p.policyName||"-")+"</a>":(p.contactName||p.policyName||"-");\n      var proc=p.processedAt?new Date(p.processedAt).toLocaleString():"-";\n      return "<tr><td>"+name+"</td><td>"+(p.insuranceCompany||"-")+"</td><td>"+(p.applicationDate||"-")+"</td><td>"+(p.effectiveDate||"-")+"</td><td>"+(p.stage||"-")+"</td><td>"+(p.agent||"-")+"</td><td>"+badge+"</td><td><span class=\\"tag "+(p.status||"")+"\\">"+( p.status||"-")+"</span></td><td>"+proc+"</td></tr>";\n    }).join("");\n  }).catch(function(err){tbody.innerHTML="<tr><td colspan=\\"9\\" style=\\"color:#fc8181;text-align:center;padding:20px;\\">Error: "+err.message+"</td></tr>";});\n}\nfunction loadRunsForResultsFilter(){\n  fetch("/runs").then(function(r){return r.json();}).then(function(d){\n    var sel=document.getElementById("resultsRunId");\n    sel.innerHTML="<option value=\\"\\">- Select a run -</option>";\n    (d.runs||[]).forEach(function(r){\n      var o=document.createElement("option");\n      o.value=r.runId;\n      o.textContent=(r.startDate||"?")+" to "+(r.endDate||"?")+" ("+(r.status||"?")+") "+(r.startedAt?new Date(r.startedAt).toLocaleDateString():"");\n      sel.appendChild(o);\n    });\n  });\n}\n\nfunction loadHistory(){\n  fetch("/runs").then(function(r){return r.json();}).then(function(d){\n    var tbody=document.getElementById("historyBody");\n    if(!d.runs||d.runs.length===0){tbody.innerHTML="<tr><td colspan=\\"9\\" style=\\"color:#718096;text-align:center;padding:20px;\\">No runs yet</td></tr>";return;}\n    tbody.innerHTML=d.runs.map(function(r){\n      var started=r.startedAt?new Date(r.startedAt).toLocaleString():"-";\n      var finished=r.finishedAt?new Date(r.finishedAt).toLocaleString():"-";\n      var elapsed="-";\n      if(r.startedAt&&r.finishedAt){var ms=new Date(r.finishedAt)-new Date(r.startedAt);var mins=Math.floor(ms/60000);var secs=Math.floor((ms%60000)/1000);elapsed=mins>0?mins+"m "+secs+"s":secs+"s";}\n      var s=r.stats||{};\n      var btn=(r.status==="cancelled"||r.status==="error")\n        ?"<button class=\\"btn btn-secondary resume-btn\\" onclick=\\"resumeRun(\'"+r.runId+"\',\'"+r.startDate+"\',\'"+r.endDate+"\')\\" >Resume</button>"\n        :"<button class=\\"btn btn-secondary resume-btn\\" onclick=\\"viewRunResults(\'"+r.runId+"\')\\" >View</button>";\n      return "<tr><td>"+(r.startDate||"?")+" to "+(r.endDate||"?")+"</td><td>"+started+"</td><td>"+finished+"</td><td>"+elapsed+"</td><td><span class=\\"tag "+(r.status||"")+"\\">"+( r.status||"-")+"</span></td><td>"+(s.total!=null?s.total:"-")+"</td><td>"+(s.attached!=null?s.attached:"-")+"</td><td>"+(s.errors!=null?s.errors:"-")+"</td><td>"+btn+"</td></tr>";\n    }).join("");\n  });\n}\nfunction viewRunResults(runId){\n  showTab("results");\n  document.getElementById("resultsRunId").value=runId;\n  loadResultsByRun();\n}\nfunction resumeRun(runId,startDate,endDate){\n  if(!confirm("Resume this run? Already-processed policies will be skipped.")) return;\n  showTab("backfill");\n  document.getElementById("startDate").value=startDate;\n  document.getElementById("endDate").value=endDate;\n  clearLog(); setRunning(true);\n  appendLog("[UI] Resuming run "+runId);\n  fetch("/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({startDate:startDate,endDate:endDate,resumeRunId:runId})})\n    .then(function(r){return r.json();})\n    .then(function(d){if(d.error){appendLog("[UI] Error: "+d.error);setRunning(false);return;}pollStatus();});\n}\n\nconnectSSE();\nvar today=new Date();\nvar ago=new Date(today);\nago.setMonth(ago.getMonth()-6);\ndocument.getElementById("endDate").value=today.toISOString().split("T")[0];\ndocument.getElementById("startDate").value=ago.toISOString().split("T")[0];\n</script>\n</body>\n</html>';
+}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Backfill Tool] Server running on port ${PORT}`);
