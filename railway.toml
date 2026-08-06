@@ -1,9 +1,6 @@
 [build]
 builder = "nixpacks"
 
-[build.nixpacksPlan.phases.setup]
-nixPkgs = ["nodejs", "chromium", "glib", "nss", "nspr", "atk", "cups", "dbus", "libdrm", "libxkbcommon", "mesa", "pango", "cairo", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "xorg.libxcb"]
-
 [deploy]
-startCommand = "npx playwright install chromium && node src/server.js"
+startCommand = "npx playwright install-deps chromium && npx playwright install chromium && node src/server.js"
 restartPolicyType = "on_failure"
