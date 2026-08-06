@@ -322,7 +322,7 @@ app.get("/", (req, res) => {
 </div><!-- /container -->
 
 <script>
-const ZOHO_ORG_ID = "${ZOHO_ORG_ID}";
+const ZOHO_ORG_ID = "` + ZOHO_ORG_ID + `";
 
 function zohoUrl(zohoId) {
   return "https://crm.zoho.com/crm/org" + ZOHO_ORG_ID + "/tab/Potentials/" + zohoId;
