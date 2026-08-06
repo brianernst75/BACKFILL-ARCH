@@ -231,7 +231,19 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         activeRun.stats.processed++;
 
         const status = policyAttached > 0 ? "done" : (policySkipped > 0 ? "skipped" : "no_recordings");
-        await markPolicyProcessed(runId, policy.id, status, { attached: policyAttached, skipped: policySkipped });
+        await markPolicyProcessed(runId, policy.id, status, {
+          attached: policyAttached,
+          skipped: policySkipped,
+          policyName: policy.Deal_Name,
+          contactName: contact?.Full_Name || `${contact?.First_Name || ""} ${contact?.Last_Name || ""}`.trim(),
+          insuranceCompany: policy.Insurance_Company || null,
+          applicationDate: policy.Application_Date || null,
+          effectiveDate: policy.Effective_Date || null,
+          stage: policy.Stage || null,
+          agent: policy.Owner?.name || null,
+          zohoId: policy.id,
+          processedAt: new Date(),
+        });
 
         log(`[Backfill] ✅ ${policyLabel} — attached: ${policyAttached}, skipped: ${policySkipped}`);
 

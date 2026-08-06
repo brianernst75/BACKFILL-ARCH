@@ -103,3 +103,30 @@ export async function getBackfillRuns() {
   const database = await getDb();
   return database.collection("backfill_runs").find({}).sort({ startedAt: -1 }).limit(20).toArray();
 }
+
+/**
+ * Get all processed policies for a given application date (YYYY-MM-DD).
+ */
+export async function getPoliciesByApplicationDate(applicationDate) {
+  const database = await getDb();
+  return database.collection("backfill_progress").find({
+    applicationDate,
+  }).sort({ processedAt: -1 }).toArray();
+}
+
+/**
+ * Get all processed policies for a given runId.
+ */
+export async function getPoliciesByRunId(runId) {
+  const database = await getDb();
+  return database.collection("backfill_progress").find({ runId }).sort({ processedAt: 1 }).toArray();
+}
+
+/**
+ * Get all unique application dates that have been processed.
+ */
+export async function getProcessedApplicationDates() {
+  const database = await getDb();
+  const result = await database.collection("backfill_progress").distinct("applicationDate");
+  return result.filter(Boolean).sort().reverse();
+}
