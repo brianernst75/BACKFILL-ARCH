@@ -1,0 +1,6 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "npx playwright install chromium && node src/server.js"
+restartPolicyType = "on_failure"
