@@ -251,9 +251,9 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               const mappings = await session.scrapeRecordsIdsByPhone(enrollNum, policy.Application_Date, policy.Application_Date);
               if (mappings.length > 0) {
                 await storeRecordsIds(mappings);
-                for (const m of mappings) {
-                  try {
-                    const result = await attachRecordingToZoho("Potentials", policy.id, m.uniqueId, null, policy.Deal_Name, session);
+                // Dedup by uniqueId — scrape can return same recording multiple times
+                const seenEnrollIds = new Set();
+                for (const m of mappings.filter(m => { if (seenEnrollIds.has(m.uniqueId)) return false; seenEnrollIds.add(m.uniqueId); return true; })) {
                     if (!result.skipped) {
                       enrollAttached++;
                       activeRun.stats.attached++;
