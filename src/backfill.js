@@ -241,6 +241,51 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         activeRun.stats.skipped += policySkipped;
         activeRun.stats.processed++;
 
+        // ── Enrollment 3-way call recordings ─────────────────────────────────
+        // Scrape both enrollment 800 numbers for the policy's application date
+        // and attach any found recordings directly to the policy
+        if (policy.Application_Date) {
+          const ENROLLMENT_NUMBERS = ["8009850245", "8887252832"];
+          let enrollAttached = 0;
+          for (const enrollNum of ENROLLMENT_NUMBERS) {
+            try {
+              const mappings = await session.scrapeRecordsIdsByPhone(enrollNum, policy.Application_Date, policy.Application_Date);
+              if (mappings.length > 0) {
+                await storeRecordsIds(mappings);
+                for (const m of mappings) {
+                  try {
+                    const result = await attachRecordingToZoho("Potentials", policy.id, m.uniqueId, null, policy.Deal_Name, session);
+                    if (!result.skipped) {
+                      enrollAttached++;
+                      activeRun.stats.attached++;
+                      log(`[Backfill] 📞 ${policyLabel} — enrollment recording attached (${enrollNum})`);
+                    }
+                  } catch (err) {
+                    log(`[Backfill] ⚠ Enrollment attach failed for ${m.uniqueId}: ${err.message}`);
+                    activeRun.stats.errors++;
+                    policyErrors++;
+                    const db = await getDb();
+                    await db.collection("backfill_errors").insertOne({
+                      runId,
+                      policyId: policy.id,
+                      policyName: policy.Deal_Name,
+                      uniqueId: m.uniqueId,
+                      error: err.message,
+                      failedAt: new Date(),
+                      type: "enrollment",
+                    });
+                  }
+                }
+              }
+            } catch (err) {
+              log(`[Backfill] ⚠ Enrollment scrape failed for ${enrollNum}: ${err.message}`);
+            }
+          }
+          if (enrollAttached > 0) {
+            policyAttached += enrollAttached;
+          }
+        }
+
         const status = policyAttached > 0 ? "done" : (policySkipped > 0 ? "skipped" : "no_recordings");
         await markPolicyProcessed(runId, policy.id, status, {
           attached: policyAttached,
