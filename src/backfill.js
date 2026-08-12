@@ -242,9 +242,8 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         activeRun.stats.processed++;
 
         // ── Enrollment 3-way call recordings ─────────────────────────────────
-        // Scrape both enrollment 800 numbers for the policy's application date
-        // and attach any found recordings directly to the policy
-        if (policy.Application_Date) {
+        // Only for policies with Voice Signature = Yes (Smoker_Status = "Yes")
+        if (policy.Application_Date && policy.Smoker_Status === "Yes") {
           const ENROLLMENT_NUMBERS = ["8009850245", "8887252832"];
           let enrollAttached = 0;
           for (const enrollNum of ENROLLMENT_NUMBERS) {

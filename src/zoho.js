@@ -59,7 +59,7 @@ export async function getSoldMAPoliciesByDateRange(startDate, endDate) {
     try {
       const data = await zohoGet("Potentials/search", {
         criteria: `((Coverage_Type:equals:Medicare Advantage)and(Application_Date:between:${startDate},${endDate}))`,
-        fields: "id,Deal_Name,Coverage_Type,Application_Date,Stage,Contact_Name,Insurance_Company,Owner",
+        fields: "id,Deal_Name,Coverage_Type,Application_Date,Stage,Contact_Name,Insurance_Company,Owner,Smoker_Status",
         per_page: 200,
         page,
       });
