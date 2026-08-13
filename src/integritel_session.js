@@ -167,6 +167,85 @@ export class IntegritelSession {
     return { buffer, contentType: "audio/mpeg", filename: match?.[1] || `record_${recordsId}.mp3` };
   }
 
+  async scrapeCdrsByPhone(phone, startDate, endDate) {
+    const clean = phone.replace(/\D/g, "").slice(-10);
+    const filterRaw = `${startDate}|${endDate}|rxtx|8|destination|| |00:00:00|23:59:59|%${clean}%|destination||uniqueid||`;
+    const filter = Buffer.from(filterRaw).toString("base64");
+    const url = `${BASE_URL}/?app=pbxware&t=reports&v=CDR&e=&server=${SERVER}&filter_cost=&recorded=&filter=${encodeURIComponent(filter)}`;
+
+    console.log(`[Integritel] Scraping CDRs for phone ${clean} from ${startDate} to ${endDate}`);
+    const { text: html } = await this.fetchWithSession(url);
+
+    const cdrs = [];
+
+    // Match each row block
+    const rowBlockPattern = /id="row_(\d+)"[\s\S]*?(?=id="row_\d+"|$)/g;
+    let rowMatch;
+
+    while ((rowMatch = rowBlockPattern.exec(html)) !== null) {
+      const rowId = rowMatch[1];
+      const block = rowMatch[0];
+
+      // Extract uniqueId from hidden_ROWID_3
+      const uniqueIdMatch = block.match(new RegExp(`hidden_${rowId}_3"[^>]*value="([^"]+)"`));
+      if (!uniqueIdMatch) continue;
+      const uniqueId = uniqueIdMatch[1];
+
+      // Extract recordsId from checkbox value
+      const recordsIdMatch = block.match(new RegExp(`id="record_${rowId}"[^>]*value="(\\d+)"`));
+      const recordsId = recordsIdMatch ? recordsIdMatch[1] : rowId;
+
+      // Extract td fields in order: from, to, datetime, billDuration, totalDuration, status, destination
+      const tdMatches = [...block.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)];
+      // Skip first td (checkbox column)
+      const tds = tdMatches.slice(1).map(m => m[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, "").trim());
+
+      const from = tds[0] || null;
+      const to = tds[1] || null;
+      const dateTimeStr = tds[2] || null;
+      const totalDurationStr = tds[4] || tds[3] || null;
+      const status = tds[5] || null;
+      const destination = tds[6] ? tds[6].replace(/[<>]/g, "").trim() : null;
+
+      // Parse date/time — format: "11-03-2025 06:48:54 PM"
+      let dateTimeIso = null;
+      if (dateTimeStr) {
+        try {
+          const dt = new Date(dateTimeStr);
+          if (!isNaN(dt)) dateTimeIso = dt.toISOString();
+        } catch (_) {}
+      }
+
+      // Parse duration — format "00:01:15"
+      let durationSeconds = 0;
+      if (totalDurationStr) {
+        const parts = totalDurationStr.split(":").map(Number);
+        if (parts.length === 3) durationSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      }
+
+      const { normalizePhone } = await import("./config.js");
+
+      cdrs.push({
+        uniqueId,
+        recordsId,
+        from: from ? from.replace(/^\+/, "") : null,
+        to: to ? to.replace(/^\+/, "") : null,
+        normalizedFrom: normalizePhone(from),
+        normalizedTo: normalizePhone(to),
+        dateTimeIso,
+        durationSeconds,
+        status: status || "Answered",
+        destination,
+        recordingAvailable: block.includes("cdr_rec_available"),
+        cachedAt: new Date(),
+        source: "playwright",
+      });
+    }
+
+    console.log(`[Integritel] scrapeCdrsByPhone found ${cdrs.length} CDRs for ${clean}`);
+    return cdrs;
+  }
+
   async scrapeRecordsIdsByPhone(phone, startDate, endDate) {
     const clean = phone.replace(/\D/g, "").slice(-10);
     const filterRaw = `${startDate}|${endDate}|rxtx|8|destination|| |00:00:00|23:59:59|%${clean}%|destination||uniqueid||`;

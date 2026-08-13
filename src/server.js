@@ -253,7 +253,6 @@ app.post("/enroll-cdr/start", async (req, res) => {
   res.json({ started: true });
 
   (async () => {
-    const { fetchCdrsByPhone } = await import("./integritel.js");
     const { storeCdrs } = await import("./db.js");
     broadcastLog("[EnrollCDR] Starting enrollment CDR pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
     let totalStored = 0;
@@ -293,30 +292,39 @@ app.post("/enroll-cdr/start", async (req, res) => {
         broadcastLog("[EnrollCDR] " + date + " — fetching CDRs for " + clientPhones.size + " phone(s) + 2 enrollment numbers");
         let allRecords = [];
 
-        for (const phone of clientPhones) {
-          if (enrollPreloadCancelled) break;
-          try {
-            const result = await fetchCdrsByPhone(date, date, phone);
-            if (result.records.length > 0) {
-              allRecords = allRecords.concat(result.records);
-              broadcastLog("[EnrollCDR] " + date + " — " + result.records.length + " CDR(s) for " + phone);
-            }
-          } catch (err) {
-            broadcastLog("[EnrollCDR] CDR fetch failed for " + phone + ": " + err.message);
-          }
-        }
+        // Use Playwright session to scrape CDRs — fast, targeted, no API needed
+        const { IntegritelSession } = await import("./integritel_session.js");
+        const session = new IntegritelSession();
+        await session.init();
 
-        for (const enrollNum of ENROLLMENT_NUMBERS) {
-          if (enrollPreloadCancelled) break;
-          try {
-            const result = await fetchCdrsByPhone(date, date, enrollNum);
-            if (result.records.length > 0) {
-              allRecords = allRecords.concat(result.records);
-              broadcastLog("[EnrollCDR] " + date + " — " + result.records.length + " enrollment CDR(s) for " + enrollNum);
+        try {
+          for (const phone of clientPhones) {
+            if (enrollPreloadCancelled) break;
+            try {
+              const cdrs = await session.scrapeCdrsByPhone(phone, date, date);
+              if (cdrs.length > 0) {
+                allRecords = allRecords.concat(cdrs);
+                broadcastLog("[EnrollCDR] " + date + " — " + cdrs.length + " CDR(s) for " + phone);
+              }
+            } catch (err) {
+              broadcastLog("[EnrollCDR] CDR scrape failed for " + phone + ": " + err.message);
             }
-          } catch (err) {
-            broadcastLog("[EnrollCDR] CDR fetch failed for " + enrollNum + ": " + err.message);
           }
+
+          for (const enrollNum of ENROLLMENT_NUMBERS) {
+            if (enrollPreloadCancelled) break;
+            try {
+              const cdrs = await session.scrapeCdrsByPhone(enrollNum, date, date);
+              if (cdrs.length > 0) {
+                allRecords = allRecords.concat(cdrs);
+                broadcastLog("[EnrollCDR] " + date + " — " + cdrs.length + " enrollment CDR(s) for " + enrollNum);
+              }
+            } catch (err) {
+              broadcastLog("[EnrollCDR] CDR scrape failed for " + enrollNum + ": " + err.message);
+            }
+          }
+        } finally {
+          await session.close().catch(() => {});
         }
 
         const seen = new Set();
