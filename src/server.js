@@ -108,100 +108,58 @@ app.get("/errors/:policyId", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// CDR Pre-Load
-let cdrPreloadActive = false;
-let cdrPreloadCancelled = false;
-let cdrPreloadAbortController = null;
-let cdrCompletedDates = new Set(); // Track completed dates for resume
+// CDR Pre-Load — runs in a worker thread so it never blocks the main event loop
+import { Worker } from "worker_threads";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Keep-alive ping to prevent Railway health check timeout during long fetches
-let keepAliveInterval = null;
-function startKeepAlive() {
-  keepAliveInterval = setInterval(() => {
-    for (const res of sseClients) {
-      try { res.write(": keep-alive\n\n"); } catch (_) {}
-    }
-  }, 20000); // ping every 20 seconds
-}
-function stopKeepAlive() {
-  if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
-}
+let cdrWorker = null;
+let cdrPreloadActive = false;
+let cdrCompletedDates = new Set();
 
 app.post("/cdr-preload/start", async (req, res) => {
   const { startDate, endDate, resume } = req.body;
   if (!startDate || !endDate) return res.status(400).json({ error: "startDate and endDate required" });
   if (cdrPreloadActive) return res.status(409).json({ error: "A CDR pre-load is already running" });
+
+  const dates = [];
+  const cur = new Date(startDate);
+  const end = new Date(endDate);
+  while (cur <= end) {
+    const d = cur.toISOString().split("T")[0];
+    if (!resume || !cdrCompletedDates.has(d)) dates.push(d);
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  if (dates.length === 0) return res.json({ started: false, message: "All dates already loaded." });
+  if (!resume) cdrCompletedDates = new Set();
+  cdrPreloadActive = true;
   res.json({ started: true });
 
-  cdrPreloadActive = true;
-  cdrPreloadCancelled = false;
-  if (!resume) cdrCompletedDates = new Set(); // Clear completed dates on fresh start
+  broadcastLog("[CDR] Starting pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
 
-  (async () => {
-    const { fetchCdrs } = await import("./integritel.js");
-    const { storeCdrs, getDb } = await import("./db.js");
+  cdrWorker = new Worker(join(__dirname, "cdr_worker.js"), {
+    workerData: { dates, mongoUri: process.env.MONGODB_URI },
+  });
 
-    const dates = [];
-    const cur = new Date(startDate);
-    const end = new Date(endDate);
-    while (cur <= end) {
-      dates.push(cur.toISOString().split("T")[0]);
-      cur.setDate(cur.getDate() + 1);
-    }
-
-    broadcastLog("[CDR] Starting pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
-    startKeepAlive();
-
-    let totalUpserted = 0;
-    let totalRecords = 0;
-
-    for (let i = 0; i < dates.length; i++) {
-      if (cdrPreloadCancelled) {
-        broadcastLog("[CDR] Cancelled at day " + (i + 1) + " of " + dates.length);
-        break;
-      }
-
-      const date = dates[i];
-
-      // Skip already completed dates on resume
-      if (cdrCompletedDates.has(date)) {
-        broadcastLog("[CDR] [" + (i + 1) + "/" + dates.length + "] " + date + " — already loaded, skipping");
-        continue;
-      }
-
-      try {
-        broadcastLog("[CDR] [" + (i + 1) + "/" + dates.length + "] Fetching " + date + "...");
-        cdrPreloadAbortController = new AbortController();
-        const result = await fetchCdrs(date, date);
-        if (cdrPreloadCancelled) { broadcastLog("[CDR] Cancelled."); break; }
-        const stored = await storeCdrs(result.records);
-        totalRecords += result.records.length;
-        totalUpserted += stored.upserted;
-        cdrCompletedDates.add(date);
-        broadcastLog("[CDR] [" + (i + 1) + "/" + dates.length + "] " + date + " — " + result.records.length + " records, " + stored.upserted + " new");
-      } catch (err) {
-        if (cdrPreloadCancelled) { broadcastLog("[CDR] Cancelled."); break; }
-        broadcastLog("[CDR] [" + (i + 1) + "/" + dates.length + "] ERROR on " + date + ": " + err.message);
-      }
-
-      // Small pause between days to let health checks through
-      await new Promise(r => setTimeout(r, 500));
-    }
-
-    stopKeepAlive();
-    broadcastLog("[CDR] Done. Total records: " + totalRecords + ", new: " + totalUpserted);
-    cdrPreloadActive = false;
-    cdrPreloadAbortController = null;
-  })().catch(err => {
-    stopKeepAlive();
-    broadcastLog("[CDR] Fatal error: " + err.message);
-    cdrPreloadActive = false;
+  cdrWorker.on("message", (msg) => {
+    if (msg.type === "log") broadcastLog(msg.msg);
+    if (msg.type === "dayComplete") cdrCompletedDates.add(msg.date);
+    if (msg.type === "done") { cdrPreloadActive = false; cdrWorker = null; }
+  });
+  cdrWorker.on("error", (err) => {
+    broadcastLog("[CDR] Worker error: " + err.message);
+    cdrPreloadActive = false; cdrWorker = null;
+  });
+  cdrWorker.on("exit", (code) => {
+    if (code !== 0) broadcastLog("[CDR] Worker exited with code " + code);
+    cdrPreloadActive = false; cdrWorker = null;
   });
 });
 
 app.post("/cdr-preload/cancel", (req, res) => {
-  cdrPreloadCancelled = true;
-  if (cdrPreloadAbortController) cdrPreloadAbortController.abort();
+  if (cdrWorker) { cdrWorker.postMessage("cancel"); broadcastLog("[CDR] Stop requested..."); }
   res.json({ cancelled: true });
 });
 
