@@ -80,6 +80,7 @@ parentPort.on("message", (msg) => {
   if (msg === "cancel") cancelled = true;
 });
 
+(async () => {
 let totalStored = 0;
 
 for (const date of dates) {
@@ -170,3 +171,7 @@ for (const date of dates) {
 
 log("[EnrollCDR] Done. Total new records stored: " + totalStored);
 parentPort.postMessage({ type: "done", totalStored });
+})().catch(err => {
+  parentPort.postMessage({ type: "log", msg: "[EnrollCDR] Fatal: " + err.message });
+  parentPort.postMessage({ type: "done", totalStored: 0 });
+});

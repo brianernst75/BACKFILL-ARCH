@@ -34,6 +34,7 @@ parentPort.on("message", (msg) => {
   if (msg === "cancel") cancelled = true;
 });
 
+(async () => {
 let totalRecords = 0;
 let totalUpserted = 0;
 
@@ -63,3 +64,7 @@ for (let i = 0; i < dates.length; i++) {
 
 log("[CDR] Done. Total records: " + totalRecords + ", new: " + totalUpserted);
 parentPort.postMessage({ type: "done", totalRecords, totalUpserted });
+})().catch(err => {
+  parentPort.postMessage({ type: "log", msg: "[CDR] Fatal: " + err.message });
+  parentPort.postMessage({ type: "done", totalRecords: 0, totalUpserted: 0 });
+});
