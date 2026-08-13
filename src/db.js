@@ -146,3 +146,21 @@ export async function getErrorsForRun(runId) {
   const database = await getDb();
   return database.collection("backfill_errors").find({ runId }).sort({ failedAt: -1 }).toArray();
 }
+
+/**
+ * Store a batch of CDR records into MongoDB.
+ * Upserts by uniqueId so re-runs don't create duplicates.
+ */
+export async function storeCdrs(records) {
+  if (!records || records.length === 0) return { upserted: 0, modified: 0, total: 0 };
+  const database = await getDb();
+  const ops = records.map(r => ({
+    updateOne: {
+      filter: { uniqueId: r.uniqueId },
+      update: { $set: { ...r, cachedAt: new Date() } },
+      upsert: true,
+    },
+  }));
+  const result = await database.collection("cdrs").bulkWrite(ops);
+  return { upserted: result.upsertedCount, modified: result.modifiedCount, total: records.length };
+}
