@@ -152,6 +152,8 @@ export async function fetchCdrsByPhone(start, end, phone) {
     records: filtered,
   };
 }
+
+export async function fetchCdrs(start, end) {
   if (!DOMAIN || !TENANT || !API_KEY) {
     throw new Error("Missing INTEGRITEL_DOMAIN, INTEGRITEL_TENANT_ID or INTEGRITEL_API_KEY");
   }
