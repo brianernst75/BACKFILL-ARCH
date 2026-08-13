@@ -108,6 +108,26 @@ app.get("/errors/:policyId", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Debug — scrape raw CDR HTML for a phone+date to see field structure
+app.get("/debug/cdr-html", async (req, res) => {
+  const { phone, date } = req.query;
+  if (!phone || !date) return res.status(400).json({ error: "phone and date required" });
+  try {
+    const { IntegritelSession } = await import("./integritel_session.js");
+    const session = new IntegritelSession();
+    await session.init();
+    const { text: html } = await session.fetchWithSession(
+      `${process.env.INTEGRITEL_DOMAIN?.replace(/\/$/, "") || "https://voice.integritel.com"}/?app=pbxware&t=reports&v=CDR&e=&server=${process.env.INTEGRITEL_TENANT_ID || "29"}&filter_cost=&recorded=&filter=${encodeURIComponent(Buffer.from(`${date}|${date}|rxtx|8|destination|| |00:00:00|23:59:59|%${phone.replace(/\D/g, "").slice(-10)}%|destination||uniqueid||`).toString("base64"))}`
+    );
+    await session.close();
+    // Return first row's raw HTML for inspection
+    const firstRow = html.match(/id="row_\d+"[\s\S]{0,3000}/)?.[0] || "no rows found";
+    res.json({ htmlLength: html.length, hasRows: html.includes('id="row_'), firstRow });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Healthcheck — always responds 200 so Railway never kills the container during long fetches
 app.get("/healthcheck", (req, res) => res.status(200).send("ok"));
 
