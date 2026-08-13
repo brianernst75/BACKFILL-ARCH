@@ -282,7 +282,6 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           }).toArray();
 
           if (enrollmentCdrs.length === 0) {
-            log(`[Backfill] 🔍 DEBUG queried cdrs for date ${policy.Application_Date}T00:00:00.000Z to ${policy.Application_Date}T23:59:59.999Z`);
             log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no enrollment CDRs in cache for ${policy.Application_Date}`);
           } else {
             log(`[Backfill] 🔍 DEBUG found ${enrollmentCdrs.length} enrollment CDR(s) for ${policy.Application_Date}`);
@@ -296,15 +295,18 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
 
               if (!agentExt) continue;
 
-              // Look back 2 minutes before the 800 call started
+              // The client call is active when the agent dials the 800 number (3-way call).
+              // Find calls that started before the 800 call within a 30-min lookback window.
               const enrollStart = new Date(enrollCdr.dateTimeIso);
-              const windowStart = new Date(enrollStart.getTime() - WINDOW_MS).toISOString();
-              const windowEnd   = enrollStart.toISOString();
+              const THIRTY_MIN_MS = 30 * 60 * 1000;
+              const lookbackStart = new Date(enrollStart.getTime() - THIRTY_MIN_MS).toISOString();
+              const lookbackEnd   = enrollStart.toISOString();
 
-              // Get all calls involving this agent in that window
+              // Get all calls involving this agent that started in the 30-min window before the 800 call
               const candidates = await db.collection("cdrs").find({
                 status: "Answered",
                 durationSeconds: { $gt: 0 },
+                dateTimeIso: { $gte: lookbackStart, $lte: lookbackEnd },
                 $or: [{ normalizedFrom: agentExt }, { normalizedTo: agentExt }],
               }).toArray();
 
@@ -319,18 +321,12 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                                         RING_GROUPS.has(otherSide) || INBOUND_DIDS.has(otherSide);
                 if (otherIsInternal) return false;
                 if (!c.dateTimeIso || !c.durationSeconds) return false;
-                const callEnd = new Date(new Date(c.dateTimeIso).getTime() + c.durationSeconds * 1000);
-                return callEnd >= new Date(windowStart) && callEnd <= new Date(windowEnd);
+                return true;
               });
 
-              log(`[Backfill] 🔍 DEBUG enrollCdr uniqueId=${enrollCdr.uniqueId} from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt}`);
-              log(`[Backfill] 🔍 DEBUG windowStart=${windowStart} windowEnd=${windowEnd}`);
-              log(`[Backfill] 🔍 DEBUG candidates before filter: ${candidates.length}`);
+              log(`[Backfill] 🔍 DEBUG enrollCdr from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt} lookback=${lookbackStart} → ${lookbackEnd} candidates=${candidates.length} clientCdrs=${clientCdrs.length}`);
 
-              if (clientCdrs.length === 0) {
-                log(`[Backfill] 🔍 DEBUG no clientCdrs after filter for agentExt=${agentExt}`);
-                continue;
-              }
+              if (clientCdrs.length === 0) continue;
 
               // Take the client call whose end time is closest to the 800 call start
               clientCdrs.sort((a, b) => {
@@ -343,12 +339,10 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               const cFrom = normalizePhone(clientCdr.from);
               const clientPhone = cFrom === agentExt ? normalizePhone(clientCdr.to) : cFrom;
 
-              log(`[Backfill] 🔍 DEBUG clientCdr from=${clientCdr.from} to=${clientCdr.to} dateTimeIso=${clientCdr.dateTimeIso} duration=${clientCdr.durationSeconds}`);
-              log(`[Backfill] 🔍 DEBUG clientPhone=${clientPhone} policy phones=${JSON.stringify(phones)}`);
-
               // Only attach if this client phone belongs to THIS policy's contact
+              log(`[Backfill] 🔍 DEBUG clientPhone=${clientPhone} policy phones=${JSON.stringify(phones)}`);
               if (!phones.includes(clientPhone)) {
-                log(`[Backfill] 🔍 DEBUG phone mismatch — clientPhone ${clientPhone} not in ${JSON.stringify(phones)}`);
+                log(`[Backfill] 🔍 DEBUG phone mismatch — ${clientPhone} not in policy phones`);
                 continue;
               }
 
