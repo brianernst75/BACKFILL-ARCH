@@ -138,11 +138,41 @@ app.get("/debug/cdr-html", async (req, res) => {
 // Debug — see raw Zoho attachments for a policy
 app.get("/debug/attachments/:policyId", async (req, res) => {
   try {
-    const { getZohoAttachments } = await import("./zoho.js");
-    const attachments = await getZohoAttachments("Potentials", req.params.policyId);
-    res.json({ count: attachments.length, attachments });
+    const { zohoGetById } = await import("./zoho.js");
+    // Try multiple approaches
+    const results = {};
+
+    // Approach 1: v6 Attachments
+    try {
+      const { getZohoAttachments } = await import("./zoho.js");
+      const a1 = await getZohoAttachments("Potentials", req.params.policyId);
+      results.v6_attachments = a1;
+    } catch (e) { results.v6_attachments_error = e.message; }
+
+    // Approach 2: v2 API
+    try {
+      const token = await getZohoTokenDirect();
+      const r2 = await fetch(`${process.env.ZOHO_API_DOMAIN || "https://www.zohoapis.com"}/crm/v2/Potentials/${req.params.policyId}/Attachments`, {
+        headers: { Authorization: "Zoho-oauthtoken " + token, "X-CRM-ORG": process.env.ZOHO_ORG_ID }
+      });
+      results.v2_attachments = await r2.json();
+    } catch (e) { results.v2_attachments_error = e.message; }
+
+    res.json(results);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+async function getZohoTokenDirect() {
+  const params = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: process.env.ZOHO_CLIENT_ID,
+    client_secret: process.env.ZOHO_CLIENT_SECRET,
+    refresh_token: process.env.ZOHO_REFRESH_TOKEN,
+  });
+  const res = await fetch("https://accounts.zoho.com/oauth/v2/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: params.toString() });
+  const data = await res.json();
+  return data.access_token;
+}
 
 // Healthcheck — always responds 200 so Railway never kills the container during long fetches
 app.get("/healthcheck", (req, res) => res.status(200).send("ok"));
