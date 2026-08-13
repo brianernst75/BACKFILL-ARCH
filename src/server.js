@@ -108,14 +108,12 @@ app.get("/errors/:policyId", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// CDR Pre-Load — runs in a worker thread so it never blocks the main event loop
-import { Worker } from "worker_threads";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// Healthcheck — always responds 200 so Railway never kills the container during long fetches
+app.get("/healthcheck", (req, res) => res.status(200).send("ok"));
 
-let cdrWorker = null;
+// CDR Pre-Load
 let cdrPreloadActive = false;
+let cdrPreloadCancelled = false;
 let cdrCompletedDates = new Set();
 
 app.post("/cdr-preload/start", async (req, res) => {
@@ -135,31 +133,37 @@ app.post("/cdr-preload/start", async (req, res) => {
   if (dates.length === 0) return res.json({ started: false, message: "All dates already loaded." });
   if (!resume) cdrCompletedDates = new Set();
   cdrPreloadActive = true;
+  cdrPreloadCancelled = false;
   res.json({ started: true });
 
-  broadcastLog("[CDR] Starting pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
-
-  cdrWorker = new Worker(new URL("./cdr_worker.mjs", import.meta.url), {
-    workerData: { dates, mongoUri: process.env.MONGODB_URI },
-  });
-
-  cdrWorker.on("message", (msg) => {
-    if (msg.type === "log") broadcastLog(msg.msg);
-    if (msg.type === "dayComplete") cdrCompletedDates.add(msg.date);
-    if (msg.type === "done") { cdrPreloadActive = false; cdrWorker = null; }
-  });
-  cdrWorker.on("error", (err) => {
-    broadcastLog("[CDR] Worker error: " + err.message);
-    cdrPreloadActive = false; cdrWorker = null;
-  });
-  cdrWorker.on("exit", (code) => {
-    if (code !== 0) broadcastLog("[CDR] Worker exited with code " + code);
-    cdrPreloadActive = false; cdrWorker = null;
-  });
+  (async () => {
+    const { fetchCdrs } = await import("./integritel.js");
+    const { storeCdrs } = await import("./db.js");
+    broadcastLog("[CDR] Starting pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
+    let totalRecords = 0, totalUpserted = 0;
+    for (let i = 0; i < dates.length; i++) {
+      if (cdrPreloadCancelled) { broadcastLog("[CDR] Cancelled."); break; }
+      const date = dates[i];
+      broadcastLog("[CDR] [" + (i+1) + "/" + dates.length + "] Fetching " + date + "...");
+      try {
+        const result = await fetchCdrs(date, date);
+        const stored = await storeCdrs(result.records);
+        totalRecords += result.records.length;
+        totalUpserted += stored.upserted;
+        cdrCompletedDates.add(date);
+        broadcastLog("[CDR] [" + (i+1) + "/" + dates.length + "] " + date + " — " + result.records.length + " records, " + stored.upserted + " new");
+      } catch (err) {
+        broadcastLog("[CDR] [" + (i+1) + "/" + dates.length + "] ERROR on " + date + ": " + err.message);
+      }
+    }
+    broadcastLog("[CDR] Done. Total: " + totalRecords + ", new: " + totalUpserted);
+    cdrPreloadActive = false;
+  })().catch(err => { broadcastLog("[CDR] Fatal: " + err.message); cdrPreloadActive = false; });
 });
 
 app.post("/cdr-preload/cancel", (req, res) => {
-  if (cdrWorker) { cdrWorker.postMessage("cancel"); broadcastLog("[CDR] Stop requested..."); }
+  cdrPreloadCancelled = true;
+  broadcastLog("[CDR] Stop requested...");
   res.json({ cancelled: true });
 });
 
@@ -167,10 +171,45 @@ app.get("/cdr-preload/status", (req, res) => {
   res.json({ active: cdrPreloadActive, completedDates: [...cdrCompletedDates] });
 });
 
-// Enrollment CDR Pre-Load — targeted fetch for Voice Signature = Yes policies only
-let enrollWorker = null;
+// Enrollment CDR Pre-Load
 let enrollPreloadActive = false;
+let enrollPreloadCancelled = false;
 let enrollCompletedDates = new Set();
+
+const ZOHO_CLIENT_ID = process.env.ZOHO_CLIENT_ID;
+const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
+const ZOHO_REFRESH_TOKEN = process.env.ZOHO_REFRESH_TOKEN;
+const ZOHO_API_DOMAIN = process.env.ZOHO_API_DOMAIN || "https://www.zohoapis.com";
+const ZOHO_ORG_ID_VAL = process.env.ZOHO_ORG_ID;
+const ENROLLMENT_NUMBERS = ["8009850245", "8887252832"];
+
+async function getEnrollZohoToken() {
+  const params = new URLSearchParams({ grant_type: "refresh_token", client_id: ZOHO_CLIENT_ID, client_secret: ZOHO_CLIENT_SECRET, refresh_token: ZOHO_REFRESH_TOKEN });
+  const res = await fetch("https://accounts.zoho.com/oauth/v2/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: params.toString() });
+  const data = await res.json();
+  if (!data.access_token) throw new Error("Zoho token failed");
+  return data.access_token;
+}
+
+async function getVoiceSigPolicies(date, token) {
+  const url = new URL(ZOHO_API_DOMAIN + "/crm/v6/Potentials/search");
+  url.searchParams.set("criteria", "((Coverage_Type:equals:Medicare Advantage)and(Smoker_Status:equals:Yes)and(Application_Date:equals:" + date + "))");
+  url.searchParams.set("fields", "id,Deal_Name,Contact_Name,Owner,Application_Date");
+  url.searchParams.set("per_page", "200");
+  const res = await fetch(url, { headers: { Authorization: "Zoho-oauthtoken " + token, "X-CRM-ORG": ZOHO_ORG_ID_VAL } });
+  const data = await res.json();
+  return data.data || [];
+}
+
+async function getContactPhones(contactId, token) {
+  const res = await fetch(ZOHO_API_DOMAIN + "/crm/v6/Contacts/" + contactId, { headers: { Authorization: "Zoho-oauthtoken " + token, "X-CRM-ORG": ZOHO_ORG_ID_VAL } });
+  const data = await res.json();
+  const c = data.data?.[0];
+  if (!c) return [];
+  const { normalizePhone } = await import("./config.js");
+  return [c.Inbound_Phone, c.Phone, c.Alternate_Phone, c.Mobile, c.Other_Phone, c.Home_Phone]
+    .map(p => p ? normalizePhone(p) : null).filter(p => p && p.length === 10);
+}
 
 app.post("/enroll-cdr/start", async (req, res) => {
   const { startDate, endDate, resume } = req.body;
@@ -190,41 +229,96 @@ app.post("/enroll-cdr/start", async (req, res) => {
   if (dates.length === 0) return res.json({ started: false, message: "All dates already loaded." });
   if (!resume) enrollCompletedDates = new Set();
   enrollPreloadActive = true;
+  enrollPreloadCancelled = false;
   res.json({ started: true });
 
-  broadcastLog("[EnrollCDR] Starting enrollment CDR pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
+  (async () => {
+    const { fetchCdrsByPhone } = await import("./integritel.js");
+    const { storeCdrs } = await import("./db.js");
+    broadcastLog("[EnrollCDR] Starting enrollment CDR pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
+    let totalStored = 0;
 
-  enrollWorker = new Worker(new URL("./enrollment_cdr_worker.mjs", import.meta.url), {
-    workerData: {
-      dates,
-      mongoUri: process.env.MONGODB_URI,
-      zohoConfig: {
-        clientId: process.env.ZOHO_CLIENT_ID,
-        clientSecret: process.env.ZOHO_CLIENT_SECRET,
-        refreshToken: process.env.ZOHO_REFRESH_TOKEN,
-        apiDomain: process.env.ZOHO_API_DOMAIN || "https://www.zohoapis.com",
-        orgId: process.env.ZOHO_ORG_ID,
-      },
-    },
-  });
+    for (const date of dates) {
+      if (enrollPreloadCancelled) { broadcastLog("[EnrollCDR] Cancelled."); break; }
+      broadcastLog("[EnrollCDR] Processing " + date + "...");
+      try {
+        const token = await getEnrollZohoToken();
+        const policies = await getVoiceSigPolicies(date, token);
 
-  enrollWorker.on("message", (msg) => {
-    if (msg.type === "log") broadcastLog(msg.msg);
-    if (msg.type === "dayComplete") enrollCompletedDates.add(msg.date);
-    if (msg.type === "done") { enrollPreloadActive = false; enrollWorker = null; }
-  });
-  enrollWorker.on("error", (err) => {
-    broadcastLog("[EnrollCDR] Worker error: " + err.message);
-    enrollPreloadActive = false; enrollWorker = null;
-  });
-  enrollWorker.on("exit", (code) => {
-    if (code !== 0) broadcastLog("[EnrollCDR] Worker exited with code " + code);
-    enrollPreloadActive = false; enrollWorker = null;
-  });
+        if (policies.length === 0) {
+          broadcastLog("[EnrollCDR] " + date + " — no Voice Signature policies");
+          enrollCompletedDates.add(date); continue;
+        }
+
+        broadcastLog("[EnrollCDR] " + date + " — found " + policies.length + " Voice Sig policy/policies");
+
+        const clientPhones = new Set();
+        for (const policy of policies) {
+          if (enrollPreloadCancelled) break;
+          const contactId = policy.Contact_Name?.id;
+          if (!contactId) continue;
+          try {
+            const phones = await getContactPhones(contactId, token);
+            phones.forEach(p => clientPhones.add(p));
+          } catch (err) {
+            broadcastLog("[EnrollCDR] Phone fetch failed for " + policy.Deal_Name + ": " + err.message);
+          }
+        }
+
+        if (clientPhones.size === 0) {
+          broadcastLog("[EnrollCDR] " + date + " — no valid phones found");
+          enrollCompletedDates.add(date); continue;
+        }
+
+        broadcastLog("[EnrollCDR] " + date + " — fetching CDRs for " + clientPhones.size + " phone(s) + 2 enrollment numbers");
+        let allRecords = [];
+
+        for (const phone of clientPhones) {
+          if (enrollPreloadCancelled) break;
+          try {
+            const result = await fetchCdrsByPhone(date, date, phone);
+            if (result.records.length > 0) {
+              allRecords = allRecords.concat(result.records);
+              broadcastLog("[EnrollCDR] " + date + " — " + result.records.length + " CDR(s) for " + phone);
+            }
+          } catch (err) {
+            broadcastLog("[EnrollCDR] CDR fetch failed for " + phone + ": " + err.message);
+          }
+        }
+
+        for (const enrollNum of ENROLLMENT_NUMBERS) {
+          if (enrollPreloadCancelled) break;
+          try {
+            const result = await fetchCdrsByPhone(date, date, enrollNum);
+            if (result.records.length > 0) {
+              allRecords = allRecords.concat(result.records);
+              broadcastLog("[EnrollCDR] " + date + " — " + result.records.length + " enrollment CDR(s) for " + enrollNum);
+            }
+          } catch (err) {
+            broadcastLog("[EnrollCDR] CDR fetch failed for " + enrollNum + ": " + err.message);
+          }
+        }
+
+        const seen = new Set();
+        const deduped = allRecords.filter(r => { if (seen.has(r.uniqueId)) return false; seen.add(r.uniqueId); return true; });
+        const stored = await storeCdrs(deduped);
+        totalStored += stored.upserted;
+        broadcastLog("[EnrollCDR] " + date + " — stored " + deduped.length + " records (" + stored.upserted + " new)");
+        enrollCompletedDates.add(date);
+
+      } catch (err) {
+        broadcastLog("[EnrollCDR] ERROR on " + date + ": " + err.message);
+      }
+    }
+
+    broadcastLog("[EnrollCDR] Done. Total new: " + totalStored);
+    enrollPreloadActive = false;
+  })().catch(err => { broadcastLog("[EnrollCDR] Fatal: " + err.message); enrollPreloadActive = false; });
 });
 
 app.post("/enroll-cdr/cancel", (req, res) => {
-  if (enrollWorker) { enrollWorker.postMessage("cancel"); broadcastLog("[EnrollCDR] Stop requested..."); }
+  enrollPreloadCancelled = true;
+  broadcastLog("[EnrollCDR] Stop requested...");
   res.json({ cancelled: true });
 });
 
