@@ -302,12 +302,13 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               const lookbackStart = new Date(enrollStart.getTime() - THIRTY_MIN_MS).toISOString();
               const lookbackEnd   = enrollStart.toISOString();
 
-              // Get all calls involving this agent that started in the 30-min window before the 800 call
+              // Get all calls in the 30-min window before the 800 call.
+              // CDRs scraped by client phone store the agent's DID, not extension.
+              // So we pull ALL calls in the window and filter by agent identity below.
               const candidates = await db.collection("cdrs").find({
                 status: "Answered",
                 durationSeconds: { $gt: 0 },
                 dateTimeIso: { $gte: lookbackStart, $lte: lookbackEnd },
-                $or: [{ normalizedFrom: agentExt }, { normalizedTo: agentExt }],
               }).toArray();
 
               // Filter: find calls where one side is the agent (by extension OR DID)
@@ -333,6 +334,8 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 // Other side must not be an inbound DID or enrollment number
                 if (INBOUND_DIDS.has(otherSide) || ENROLLMENT_NUMBERS.has(otherSide)) return false;
 
+                // The phone match below (phones.includes(clientPhone)) ensures
+                // we only attach to the correct policy — no need to match agent identity here
                 return true;
               });
 

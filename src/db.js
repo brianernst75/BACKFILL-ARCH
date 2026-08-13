@@ -40,11 +40,16 @@ export async function findCdrsByPhone(phone) {
 
 /**
  * Get a recordsId for a given CDR uniqueId.
+ * Checks records_ids first, then falls back to cdrs collection
+ * (scrapeCdrsByPhone stores recordsId directly in cdrs).
  */
 export async function getRecordsId(uniqueId) {
   const database = await getDb();
   const doc = await database.collection("records_ids").findOne({ uniqueId });
-  return doc?.recordsId || null;
+  if (doc?.recordsId) return doc.recordsId;
+  // Fallback: check cdrs collection (populated by scrapeCdrsByPhone)
+  const cdr = await database.collection("cdrs").findOne({ uniqueId });
+  return cdr?.recordsId || null;
 }
 
 /**
