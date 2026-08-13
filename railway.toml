@@ -4,3 +4,5 @@ builder = "nixpacks"
 [deploy]
 startCommand = "npx playwright install-deps chromium && npx playwright install chromium && node src/server.js"
 restartPolicyType = "on_failure"
+healthcheckPath = "/healthcheck"
+healthcheckTimeout = 300
