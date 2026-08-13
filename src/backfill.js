@@ -310,17 +310,29 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 $or: [{ normalizedFrom: agentExt }, { normalizedTo: agentExt }],
               }).toArray();
 
-              // Filter: other side must be a customer phone (10-digit, not internal, not enrollment)
+              // Filter: find calls where one side is the agent (by extension OR DID)
+              // and the other side is an external customer phone.
+              // CDRs scraped by client phone have agent DIDs, not extensions — so check both.
               const clientCdrs = candidates.filter(c => {
                 const cFrom = normalizePhone(c.from);
                 const cTo   = normalizePhone(c.to);
+                if (!cFrom || !cTo) return false;
                 if (ENROLLMENT_NUMBERS.has(cFrom) || ENROLLMENT_NUMBERS.has(cTo)) return false;
-                const otherSide = cFrom === agentExt ? cTo : cFrom;
-                if (!otherSide || otherSide.length !== 10) return false;
-                const otherIsInternal = AGENT_DIDS.has(otherSide) || AGENT_EXTENSIONS.has(otherSide) ||
-                                        RING_GROUPS.has(otherSide) || INBOUND_DIDS.has(otherSide);
-                if (otherIsInternal) return false;
                 if (!c.dateTimeIso || !c.durationSeconds) return false;
+
+                // Determine which side is the agent and which is the customer
+                const fromIsAgent = AGENT_EXTENSIONS.has(cFrom) || AGENT_DIDS.has(cFrom) || RING_GROUPS.has(cFrom);
+                const toIsAgent   = AGENT_EXTENSIONS.has(cTo)   || AGENT_DIDS.has(cTo)   || RING_GROUPS.has(cTo);
+
+                if (!fromIsAgent && !toIsAgent) return false; // neither side is an agent
+                if (fromIsAgent && toIsAgent) return false;   // purely internal call
+
+                const otherSide = fromIsAgent ? cTo : cFrom;
+                if (!otherSide || otherSide.length !== 10) return false;
+
+                // Other side must not be an inbound DID or enrollment number
+                if (INBOUND_DIDS.has(otherSide) || ENROLLMENT_NUMBERS.has(otherSide)) return false;
+
                 return true;
               });
 
@@ -337,7 +349,9 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
 
               const clientCdr = clientCdrs[0];
               const cFrom = normalizePhone(clientCdr.from);
-              const clientPhone = cFrom === agentExt ? normalizePhone(clientCdr.to) : cFrom;
+              const cTo   = normalizePhone(clientCdr.to);
+              const fromIsAgent = AGENT_EXTENSIONS.has(cFrom) || AGENT_DIDS.has(cFrom) || RING_GROUPS.has(cFrom);
+              const clientPhone = fromIsAgent ? cTo : cFrom;
 
               // Only attach if this client phone belongs to THIS policy's contact
               log(`[Backfill] 🔍 DEBUG clientPhone=${clientPhone} policy phones=${JSON.stringify(phones)}`);
