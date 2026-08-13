@@ -264,6 +264,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           const { normalizePhone, AGENT_DIDS, AGENT_EXTENSIONS, RING_GROUPS, INBOUND_DIDS } = await import("./config.js");
           const db = await getDb();
           let enrollAttached = 0;
+          let enrollSkipped = 0;
 
           // Find 800-number CDRs in MongoDB for this policy's application date
           const enrollmentCdrs = await db.collection("cdrs").find({
@@ -386,7 +387,10 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
 
               try {
                 const result = await attachRecordingToZoho("Potentials", policy.id, enrollCdr.uniqueId, null, policy.Deal_Name, session);
-                if (!result.skipped) {
+                if (result.skipped) {
+                  enrollSkipped++;
+                  log(`[Backfill] ↩ ${policyLabel} — enrollment recording already attached, skipping`);
+                } else {
                   enrollAttached++;
                   activeRun.stats.attached++;
                   log(`[Backfill] 📞 ${policyLabel} — enrollment recording attached ✅`);
@@ -406,6 +410,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           }
 
           if (enrollAttached > 0) policyAttached += enrollAttached;
+          if (enrollSkipped > 0) policySkipped += enrollSkipped;
         }
 
         const status = policyAttached > 0 ? "done" : (policySkipped > 0 ? "skipped" : "no_recordings");
