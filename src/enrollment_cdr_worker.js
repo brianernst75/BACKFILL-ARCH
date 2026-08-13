@@ -1,5 +1,5 @@
 import { workerData, parentPort } from "worker_threads";
-import { fetchCdrs } from "./integritel.js";
+import { fetchCdrsByPhone } from "./integritel.js";
 import { MongoClient } from "mongodb";
 import { normalizePhone } from "./config.js";
 
@@ -121,17 +121,16 @@ for (const date of dates) {
 
     log("[EnrollCDR] " + date + " — fetching CDRs for " + clientPhones.size + " client phone(s) + 2 enrollment numbers");
 
-    // Fetch CDRs for all client phones
+    // Fetch CDRs per client phone — targeted, not full day
     let allRecords = [];
     for (const phone of clientPhones) {
       if (cancelled) break;
       try {
-        const result = await fetchCdrs(date, date);
-        // Filter to only records involving this phone
-        const matching = result.records.filter(r =>
-          r.normalizedFrom === phone || r.normalizedTo === phone
-        );
-        allRecords = allRecords.concat(matching);
+        const result = await fetchCdrsByPhone(date, date, phone);
+        allRecords = allRecords.concat(result.records);
+        if (result.records.length > 0) {
+          log("[EnrollCDR] " + date + " — " + result.records.length + " CDR(s) for " + phone);
+        }
       } catch (err) {
         log("[EnrollCDR] CDR fetch failed for " + phone + ": " + err.message);
       }
@@ -141,11 +140,11 @@ for (const date of dates) {
     for (const enrollNum of ENROLLMENT_NUMBERS) {
       if (cancelled) break;
       try {
-        const result = await fetchCdrs(date, date);
-        const matching = result.records.filter(r =>
-          r.normalizedFrom === enrollNum || r.normalizedTo === enrollNum
-        );
-        allRecords = allRecords.concat(matching);
+        const result = await fetchCdrsByPhone(date, date, enrollNum);
+        allRecords = allRecords.concat(result.records);
+        if (result.records.length > 0) {
+          log("[EnrollCDR] " + date + " — " + result.records.length + " enrollment CDR(s) for " + enrollNum);
+        }
       } catch (err) {
         log("[EnrollCDR] CDR fetch failed for " + enrollNum + ": " + err.message);
       }
