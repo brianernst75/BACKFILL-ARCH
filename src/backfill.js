@@ -282,8 +282,10 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           }).toArray();
 
           if (enrollmentCdrs.length === 0) {
+            log(`[Backfill] 🔍 DEBUG queried cdrs for date ${policy.Application_Date}T00:00:00.000Z to ${policy.Application_Date}T23:59:59.999Z`);
             log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no enrollment CDRs in cache for ${policy.Application_Date}`);
           } else {
+            log(`[Backfill] 🔍 DEBUG found ${enrollmentCdrs.length} enrollment CDR(s) for ${policy.Application_Date}`);
             for (const enrollCdr of enrollmentCdrs) {
               // Determine agent extension — internal side of the 800 call
               const fromNorm = normalizePhone(enrollCdr.from);
@@ -321,7 +323,14 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 return callEnd >= new Date(windowStart) && callEnd <= new Date(windowEnd);
               });
 
-              if (clientCdrs.length === 0) continue;
+              log(`[Backfill] 🔍 DEBUG enrollCdr uniqueId=${enrollCdr.uniqueId} from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt}`);
+              log(`[Backfill] 🔍 DEBUG windowStart=${windowStart} windowEnd=${windowEnd}`);
+              log(`[Backfill] 🔍 DEBUG candidates before filter: ${candidates.length}`);
+
+              if (clientCdrs.length === 0) {
+                log(`[Backfill] 🔍 DEBUG no clientCdrs after filter for agentExt=${agentExt}`);
+                continue;
+              }
 
               // Take the client call whose end time is closest to the 800 call start
               clientCdrs.sort((a, b) => {
@@ -334,8 +343,14 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               const cFrom = normalizePhone(clientCdr.from);
               const clientPhone = cFrom === agentExt ? normalizePhone(clientCdr.to) : cFrom;
 
+              log(`[Backfill] 🔍 DEBUG clientCdr from=${clientCdr.from} to=${clientCdr.to} dateTimeIso=${clientCdr.dateTimeIso} duration=${clientCdr.durationSeconds}`);
+              log(`[Backfill] 🔍 DEBUG clientPhone=${clientPhone} policy phones=${JSON.stringify(phones)}`);
+
               // Only attach if this client phone belongs to THIS policy's contact
-              if (!phones.includes(clientPhone)) continue;
+              if (!phones.includes(clientPhone)) {
+                log(`[Backfill] 🔍 DEBUG phone mismatch — clientPhone ${clientPhone} not in ${JSON.stringify(phones)}`);
+                continue;
+              }
 
               log(`[Backfill] 📞 ${policyLabel} — enrollment match: agent ${agentExt}, client ${clientPhone}`);
 
