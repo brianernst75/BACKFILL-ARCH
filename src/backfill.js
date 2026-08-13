@@ -252,54 +252,114 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         activeRun.stats.processed++;
 
         // ── Enrollment 3-way call recordings ─────────────────────────────────
-        // Only for policies with Voice Signature = Yes (Smoker_Status = "Yes")
+        // Only for Voice Signature = Yes policies.
+        // Uses CDR data from MongoDB (pre-loaded via Enrollment CDR Pre-Load).
+        // Matches by: agent extension + 2-minute time window around client call.
         if (policy.Application_Date && policy.Smoker_Status === "Yes") {
-          const ENROLLMENT_NUMBERS = ["8009850245", "8887252832"];
+          const ENROLLMENT_NUMBERS = new Set(["8009850245", "8887252832"]);
+          const BUFFER_MS = 2 * 60 * 1000;
+          const MIN_CLIENT_DURATION = 30; // seconds
+          const db = await getDb();
           let enrollAttached = 0;
-          for (const enrollNum of ENROLLMENT_NUMBERS) {
-            try {
-              const mappings = await session.scrapeRecordsIdsByPhone(enrollNum, policy.Application_Date, policy.Application_Date);
-              if (mappings.length > 0) {
-                await storeRecordsIds(mappings);
-                // Dedup by uniqueId — scrape can return same recording multiple times
-                const seenEnrollIds = new Set();
-                const dedupedMappings = mappings.filter(m => {
-                  if (seenEnrollIds.has(m.uniqueId)) return false;
-                  seenEnrollIds.add(m.uniqueId);
-                  return true;
-                });
-                for (const m of dedupedMappings) {
-                  try {
-                    const result = await attachRecordingToZoho("Potentials", policy.id, m.uniqueId, null, policy.Deal_Name, session);
-                    if (!result.skipped) {
-                      enrollAttached++;
-                      activeRun.stats.attached++;
-                      log(`[Backfill] 📞 ${policyLabel} — enrollment recording attached (${enrollNum})`);
-                    }
-                  } catch (err) {
-                    log(`[Backfill] ⚠ Enrollment attach failed for ${m.uniqueId}: ${err.message}`);
-                    activeRun.stats.errors++;
-                    policyErrors++;
-                    const db = await getDb();
-                    await db.collection("backfill_errors").insertOne({
-                      runId,
-                      policyId: policy.id,
-                      policyName: policy.Deal_Name,
-                      uniqueId: m.uniqueId,
-                      error: err.message,
-                      failedAt: new Date(),
-                      type: "enrollment",
-                    });
-                  }
-                }
-              }
-            } catch (err) {
-              log(`[Backfill] ⚠ Enrollment scrape failed for ${enrollNum}: ${err.message}`);
+
+          // Get client CDRs from MongoDB for this policy's phone numbers
+          const clientCdrs = [];
+          for (const phone of phones) {
+            const cdrs = await db.collection("cdrs").find({
+              dateTimeIso: {
+                $gte: policy.Application_Date + "T00:00:00.000Z",
+                $lte: policy.Application_Date + "T23:59:59.999Z",
+              },
+              $or: [{ normalizedFrom: phone }, { normalizedTo: phone }],
+              durationSeconds: { $gte: MIN_CLIENT_DURATION },
+            }).toArray();
+            for (const cdr of cdrs) {
+              if (!clientCdrs.find(c => c.uniqueId === cdr.uniqueId)) clientCdrs.push(cdr);
             }
           }
-          if (enrollAttached > 0) {
-            policyAttached += enrollAttached;
+
+          if (clientCdrs.length === 0) {
+            log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no client CDRs in cache for enrollment matching`);
+          } else {
+            // For each client CDR, find enrollment 800-number calls within 2-minute window
+            const enrollmentMatches = new Map(); // uniqueId → cdr
+
+            for (const clientCdr of clientCdrs) {
+              if (!clientCdr.dateTimeIso || !clientCdr.durationSeconds) continue;
+
+              const clientStart = new Date(clientCdr.dateTimeIso);
+              const clientEnd = new Date(clientStart.getTime() + clientCdr.durationSeconds * 1000);
+              const windowStart = new Date(clientStart.getTime() - BUFFER_MS).toISOString();
+              const windowEnd = new Date(clientEnd.getTime() + BUFFER_MS).toISOString();
+
+              const enrollCdrs = await db.collection("cdrs").find({
+                dateTimeIso: { $gte: windowStart, $lte: windowEnd },
+                $or: [
+                  { normalizedFrom: { $in: [...ENROLLMENT_NUMBERS] } },
+                  { normalizedTo: { $in: [...ENROLLMENT_NUMBERS] } },
+                ],
+              }).toArray();
+
+              for (const eCdr of enrollCdrs) {
+                if (!enrollmentMatches.has(eCdr.uniqueId)) {
+                  enrollmentMatches.set(eCdr.uniqueId, eCdr);
+                }
+              }
+            }
+
+            if (enrollmentMatches.size === 0) {
+              log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no enrollment CDR match found in time window`);
+            } else {
+              log(`[Backfill] 📞 ${policyLabel} — found ${enrollmentMatches.size} enrollment CDR match(es)`);
+
+              for (const [uniqueId, enrollCdr] of enrollmentMatches) {
+                // Get recordsId — use stored one or scrape by agent extension
+                let recordsId = enrollCdr.recordsId || await getRecordsId(uniqueId);
+
+                if (!recordsId) {
+                  const enrollDate = (enrollCdr.dateTimeIso || "").split("T")[0];
+                  // Try scraping by the enrollment number itself
+                  const enrollNum = ENROLLMENT_NUMBERS.has(enrollCdr.normalizedFrom)
+                    ? enrollCdr.normalizedFrom : enrollCdr.normalizedTo;
+                  if (enrollDate && enrollNum) {
+                    try {
+                      const mappings = await session.scrapeRecordsIdsByPhone(enrollNum, enrollDate, enrollDate);
+                      if (mappings.length > 0) {
+                        await storeRecordsIds(mappings);
+                        const match = mappings.find(m => m.uniqueId === uniqueId);
+                        if (match) recordsId = match.recordsId;
+                      }
+                    } catch (_) {}
+                  }
+                }
+
+                if (!recordsId) {
+                  log(`[Backfill] ⚠ No recordsId for enrollment CDR ${uniqueId} — skipping`);
+                  continue;
+                }
+
+                try {
+                  const result = await attachRecordingToZoho("Potentials", policy.id, uniqueId, null, policy.Deal_Name, session);
+                  if (!result.skipped) {
+                    enrollAttached++;
+                    activeRun.stats.attached++;
+                    log(`[Backfill] 📞 ${policyLabel} — enrollment recording attached`);
+                  }
+                } catch (err) {
+                  log(`[Backfill] ⚠ Enrollment attach failed for ${uniqueId}: ${err.message}`);
+                  activeRun.stats.errors++;
+                  policyErrors++;
+                  const errDb = await getDb();
+                  await errDb.collection("backfill_errors").insertOne({
+                    runId, policyId: policy.id, policyName: policy.Deal_Name,
+                    uniqueId, error: err.message, failedAt: new Date(), type: "enrollment",
+                  });
+                }
+              }
+            }
           }
+
+          if (enrollAttached > 0) policyAttached += enrollAttached;
         }
 
         const status = policyAttached > 0 ? "done" : (policySkipped > 0 ? "skipped" : "no_recordings");
