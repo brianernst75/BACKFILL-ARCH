@@ -30,7 +30,6 @@ async function storeCdrs(records) {
   }
 }
 
-// Fetch Zoho access token
 async function getZohoToken() {
   const params = new URLSearchParams({
     grant_type: "refresh_token",
@@ -48,7 +47,6 @@ async function getZohoToken() {
   return data.access_token;
 }
 
-// Get all Voice Signature = Yes policies for a date
 async function getVoiceSignaturePolicies(date, token) {
   const url = new URL(`${zohoConfig.apiDomain}/crm/v6/Potentials/search`);
   url.searchParams.set("criteria", `((Coverage_Type:equals:Medicare Advantage)and(Smoker_Status:equals:Yes)and(Application_Date:equals:${date}))`);
@@ -61,7 +59,6 @@ async function getVoiceSignaturePolicies(date, token) {
   return data.data || [];
 }
 
-// Get contact phone numbers
 async function getContactPhones(contactId, token) {
   const url = `${zohoConfig.apiDomain}/crm/v6/Contacts/${contactId}`;
   const res = await fetch(url, {
@@ -80,98 +77,95 @@ parentPort.on("message", (msg) => {
   if (msg === "cancel") cancelled = true;
 });
 
-(async () => {
-let totalStored = 0;
+async function run() {
+  let totalStored = 0;
 
-for (const date of dates) {
-  if (cancelled) { log("[EnrollCDR] Cancelled."); break; }
+  for (const date of dates) {
+    if (cancelled) { log("[EnrollCDR] Cancelled."); break; }
+    log("[EnrollCDR] Processing " + date + "...");
 
-  log("[EnrollCDR] Processing " + date + "...");
+    try {
+      const token = await getZohoToken();
+      const policies = await getVoiceSignaturePolicies(date, token);
 
-  try {
-    const token = await getZohoToken();
-    const policies = await getVoiceSignaturePolicies(date, token);
-
-    if (policies.length === 0) {
-      log("[EnrollCDR] " + date + " — no Voice Signature policies found");
-      parentPort.postMessage({ type: "dayComplete", date });
-      continue;
-    }
-
-    log("[EnrollCDR] " + date + " — found " + policies.length + " Voice Signature policy/policies");
-
-    // Collect all unique client phone numbers
-    const clientPhones = new Set();
-    for (const policy of policies) {
-      if (cancelled) break;
-      const contactId = policy.Contact_Name?.id;
-      if (!contactId) continue;
-      try {
-        const phones = await getContactPhones(contactId, token);
-        phones.forEach(p => clientPhones.add(p));
-      } catch (err) {
-        log("[EnrollCDR] Could not get phones for " + policy.Deal_Name + ": " + err.message);
+      if (policies.length === 0) {
+        log("[EnrollCDR] " + date + " — no Voice Signature policies found");
+        parentPort.postMessage({ type: "dayComplete", date });
+        continue;
       }
-    }
 
-    if (clientPhones.size === 0) {
-      log("[EnrollCDR] " + date + " — no valid phone numbers found");
-      parentPort.postMessage({ type: "dayComplete", date });
-      continue;
-    }
+      log("[EnrollCDR] " + date + " — found " + policies.length + " Voice Signature policy/policies");
 
-    log("[EnrollCDR] " + date + " — fetching CDRs for " + clientPhones.size + " client phone(s) + 2 enrollment numbers");
-
-    // Fetch CDRs per client phone — targeted, not full day
-    let allRecords = [];
-    for (const phone of clientPhones) {
-      if (cancelled) break;
-      try {
-        const result = await fetchCdrsByPhone(date, date, phone);
-        allRecords = allRecords.concat(result.records);
-        if (result.records.length > 0) {
-          log("[EnrollCDR] " + date + " — " + result.records.length + " CDR(s) for " + phone);
+      const clientPhones = new Set();
+      for (const policy of policies) {
+        if (cancelled) break;
+        const contactId = policy.Contact_Name?.id;
+        if (!contactId) continue;
+        try {
+          const phones = await getContactPhones(contactId, token);
+          phones.forEach(p => clientPhones.add(p));
+        } catch (err) {
+          log("[EnrollCDR] Could not get phones for " + policy.Deal_Name + ": " + err.message);
         }
-      } catch (err) {
-        log("[EnrollCDR] CDR fetch failed for " + phone + ": " + err.message);
       }
-    }
 
-    // Fetch CDRs for both 800 enrollment numbers
-    for (const enrollNum of ENROLLMENT_NUMBERS) {
-      if (cancelled) break;
-      try {
-        const result = await fetchCdrsByPhone(date, date, enrollNum);
-        allRecords = allRecords.concat(result.records);
-        if (result.records.length > 0) {
-          log("[EnrollCDR] " + date + " — " + result.records.length + " enrollment CDR(s) for " + enrollNum);
+      if (clientPhones.size === 0) {
+        log("[EnrollCDR] " + date + " — no valid phone numbers found");
+        parentPort.postMessage({ type: "dayComplete", date });
+        continue;
+      }
+
+      log("[EnrollCDR] " + date + " — fetching CDRs for " + clientPhones.size + " client phone(s) + 2 enrollment numbers");
+
+      let allRecords = [];
+      for (const phone of clientPhones) {
+        if (cancelled) break;
+        try {
+          const result = await fetchCdrsByPhone(date, date, phone);
+          allRecords = allRecords.concat(result.records);
+          if (result.records.length > 0) {
+            log("[EnrollCDR] " + date + " — " + result.records.length + " CDR(s) for " + phone);
+          }
+        } catch (err) {
+          log("[EnrollCDR] CDR fetch failed for " + phone + ": " + err.message);
         }
-      } catch (err) {
-        log("[EnrollCDR] CDR fetch failed for " + enrollNum + ": " + err.message);
       }
+
+      for (const enrollNum of ENROLLMENT_NUMBERS) {
+        if (cancelled) break;
+        try {
+          const result = await fetchCdrsByPhone(date, date, enrollNum);
+          allRecords = allRecords.concat(result.records);
+          if (result.records.length > 0) {
+            log("[EnrollCDR] " + date + " — " + result.records.length + " enrollment CDR(s) for " + enrollNum);
+          }
+        } catch (err) {
+          log("[EnrollCDR] CDR fetch failed for " + enrollNum + ": " + err.message);
+        }
+      }
+
+      const seen = new Set();
+      const dedupedRecords = allRecords.filter(r => {
+        if (seen.has(r.uniqueId)) return false;
+        seen.add(r.uniqueId);
+        return true;
+      });
+
+      const stored = await storeCdrs(dedupedRecords);
+      totalStored += stored.upserted;
+      log("[EnrollCDR] " + date + " — stored " + dedupedRecords.length + " records (" + stored.upserted + " new)");
+      parentPort.postMessage({ type: "dayComplete", date });
+
+    } catch (err) {
+      log("[EnrollCDR] ERROR on " + date + ": " + err.message);
     }
-
-    // Dedup by uniqueId
-    const seen = new Set();
-    const dedupedRecords = allRecords.filter(r => {
-      if (seen.has(r.uniqueId)) return false;
-      seen.add(r.uniqueId);
-      return true;
-    });
-
-    const stored = await storeCdrs(dedupedRecords);
-    totalStored += stored.upserted;
-    log("[EnrollCDR] " + date + " — stored " + dedupedRecords.length + " records (" + stored.upserted + " new)");
-    parentPort.postMessage({ type: "dayComplete", date });
-
-  } catch (err) {
-    log("[EnrollCDR] ERROR on " + date + ": " + err.message);
   }
+
+  log("[EnrollCDR] Done. Total new records stored: " + totalStored);
+  parentPort.postMessage({ type: "done", totalStored });
 }
 
-log("[EnrollCDR] Done. Total new records stored: " + totalStored);
-parentPort.postMessage({ type: "done", totalStored });
-})().catch(err => {
+run().catch(err => {
   parentPort.postMessage({ type: "log", msg: "[EnrollCDR] Fatal: " + err.message });
   parentPort.postMessage({ type: "done", totalStored: 0 });
 });
