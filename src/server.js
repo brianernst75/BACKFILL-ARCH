@@ -139,7 +139,7 @@ app.post("/cdr-preload/start", async (req, res) => {
 
   broadcastLog("[CDR] Starting pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
 
-  cdrWorker = new Worker(join(__dirname, "cdr_worker.mjs"), {
+  cdrWorker = new Worker(new URL("./cdr_worker.mjs", import.meta.url), {
     workerData: { dates, mongoUri: process.env.MONGODB_URI },
   });
 
@@ -194,7 +194,7 @@ app.post("/enroll-cdr/start", async (req, res) => {
 
   broadcastLog("[EnrollCDR] Starting enrollment CDR pre-load for " + dates.length + " day(s): " + startDate + " to " + endDate);
 
-  enrollWorker = new Worker(join(__dirname, "enrollment_cdr_worker.mjs"), {
+  enrollWorker = new Worker(new URL("./enrollment_cdr_worker.mjs", import.meta.url), {
     workerData: {
       dates,
       mongoUri: process.env.MONGODB_URI,
