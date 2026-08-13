@@ -148,3 +148,56 @@ export async function getMAPoliciesForContact(contactId) {
     return [];
   }
 }
+
+/**
+ * Fetch only Voice Signature = Yes MA Policies with Application_Date in a date range.
+ */
+export async function getVoiceSignaturePoliciesByDateRange(startDate, endDate) {
+  let page = 1;
+  let allPolicies = [];
+  let hasMore = true;
+  while (hasMore) {
+    try {
+      const data = await zohoGet("Potentials/search", {
+        criteria: `((Coverage_Type:equals:Medicare Advantage)and(Smoker_Status:equals:Yes)and(Application_Date:between:${startDate},${endDate}))`,
+        fields: "id,Deal_Name,Coverage_Type,Application_Date,Stage,Contact_Name,Insurance_Company,Owner,Smoker_Status",
+        per_page: 200,
+        page,
+      });
+      if (!data.data || data.data.length === 0) break;
+      allPolicies = allPolicies.concat(data.data);
+      hasMore = data.info?.more_records === true;
+      page++;
+      if (page > 50) break;
+    } catch (err) {
+      console.error(`[Zoho] Error fetching Voice Sig policies page ${page}:`, err.message);
+      break;
+    }
+  }
+  console.log(`[Zoho] Found ${allPolicies.length} Voice Signature MA policies between ${startDate} and ${endDate}`);
+  return allPolicies;
+}
+
+/**
+ * Delete an attachment from a Zoho record by attachment ID.
+ */
+export async function deleteZohoAttachment(module, recordId, attachmentId) {
+  const token = await getAccessToken();
+  const url = `${API_DOMAIN}/crm/v6/${module}/${recordId}/Attachments/${attachmentId}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "X-CRM-ORG": ORG_ID,
+    },
+  });
+  return res.json();
+}
+
+/**
+ * Get all attachments for a Zoho record.
+ */
+export async function getZohoAttachments(module, recordId) {
+  const data = await zohoGet(`${module}/${recordId}/Attachments`);
+  return data.data || [];
+}

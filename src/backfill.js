@@ -1,5 +1,5 @@
 import { getDb, findCdrsByPhone, getRecordsId, storeRecordsIds, markPolicyProcessed, isPolicyProcessed, saveBackfillRun } from "./db.js";
-import { getSoldMAPoliciesByDateRange, zohoGetById } from "./zoho.js";
+import { getSoldMAPoliciesByDateRange, getVoiceSignaturePoliciesByDateRange, zohoGetById } from "./zoho.js";
 import { attachRecordingToZoho } from "./zoho_attachments.js";
 import { IntegritelSession } from "./integritel_session.js";
 import { randomUUID } from "crypto";
@@ -23,7 +23,7 @@ export function cancelActiveRun() {
  * onLog: callback(msg) for SSE streaming to UI
  * resumeRunId: optional — resume a previous run instead of starting fresh
  */
-export async function runBackfill({ startDate, endDate, onLog, resumeRunId = null }) {
+export async function runBackfill({ startDate, endDate, onLog, resumeRunId = null, voiceSigOnly = false }) {
   if (activeRun && !activeRun.done) {
     throw new Error("A backfill is already running. Stop it before starting a new one.");
   }
@@ -41,6 +41,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
     startedAt: new Date(),
     done: false,
     cancelled: false,
+    voiceSigOnly,
     stats: { total: 0, processed: 0, attached: 0, skipped: 0, errors: 0, noPhone: 0, noRecordings: 0 },
   };
 
@@ -48,11 +49,12 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
     runId,
     startDate,
     endDate,
+    voiceSigOnly,
     startedAt: activeRun.startedAt,
     status: "running",
   });
 
-  log(`[Backfill] ▶ Run ${runId}`);
+  log(`[Backfill] ▶ Run ${runId}${voiceSigOnly ? " (Voice Signature Only)" : ""}`);
   log(`[Backfill] Date range: ${startDate} → ${endDate}`);
 
   let session = null;
@@ -60,7 +62,9 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
   try {
     // 1. Fetch all MA policies in range
     log(`[Backfill] Fetching MA policies from Zoho...`);
-    const policies = await getSoldMAPoliciesByDateRange(startDate, endDate);
+    const policies = voiceSigOnly
+      ? await getVoiceSignaturePoliciesByDateRange(startDate, endDate)
+      : await getSoldMAPoliciesByDateRange(startDate, endDate);
     activeRun.stats.total = policies.length;
 
     if (policies.length === 0) {
@@ -138,45 +142,48 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
 
         // Find all CDRs from cache across all phones
         let allCdrs = [];
-        for (const phone of phones) {
-          const cdrs = await findCdrsByPhone(phone);
-          for (const cdr of cdrs) {
-            if (!allCdrs.find(c => c.uniqueId === cdr.uniqueId)) allCdrs.push(cdr);
-          }
-        }
 
-        // If no CDRs in cache, scrape Integritel directly (full history)
-        if (allCdrs.length === 0) {
-          log(`[Backfill] 🔍 ${policyLabel} — no cache hits, scraping Integritel...`);
-          const scrapeStart = "2024-01-01";
-          const scrapeEnd = new Date().toISOString().split("T")[0];
+        if (!voiceSigOnly) {
           for (const phone of phones) {
-            try {
-              const mappings = await session.scrapeRecordsIdsByPhone(phone, scrapeStart, scrapeEnd);
-              if (mappings.length > 0) {
-                await storeRecordsIds(mappings);
-                for (const m of mappings) {
-                  if (!allCdrs.find(c => c.uniqueId === m.uniqueId)) {
-                    allCdrs.push({
-                      uniqueId: m.uniqueId,
-                      normalizedFrom: phone,
-                      normalizedTo: null,
-                      dateTimeIso: policy.Application_Date ? `${policy.Application_Date}T12:00:00.000Z` : new Date().toISOString(),
-                      durationSeconds: 0,
-                      from: phone,
-                      to: null,
-                    });
+            const cdrs = await findCdrsByPhone(phone);
+            for (const cdr of cdrs) {
+              if (!allCdrs.find(c => c.uniqueId === cdr.uniqueId)) allCdrs.push(cdr);
+            }
+          }
+
+          // If no CDRs in cache, scrape Integritel directly (full history)
+          if (allCdrs.length === 0) {
+            log(`[Backfill] 🔍 ${policyLabel} — no cache hits, scraping Integritel...`);
+            const scrapeStart = "2024-01-01";
+            const scrapeEnd = new Date().toISOString().split("T")[0];
+            for (const phone of phones) {
+              try {
+                const mappings = await session.scrapeRecordsIdsByPhone(phone, scrapeStart, scrapeEnd);
+                if (mappings.length > 0) {
+                  await storeRecordsIds(mappings);
+                  for (const m of mappings) {
+                    if (!allCdrs.find(c => c.uniqueId === m.uniqueId)) {
+                      allCdrs.push({
+                        uniqueId: m.uniqueId,
+                        normalizedFrom: phone,
+                        normalizedTo: null,
+                        dateTimeIso: policy.Application_Date ? `${policy.Application_Date}T12:00:00.000Z` : new Date().toISOString(),
+                        durationSeconds: 0,
+                        from: phone,
+                        to: null,
+                      });
+                    }
                   }
+                  log(`[Backfill] 🔍 ${policyLabel} — found ${mappings.length} recording(s) on ${phone}`);
                 }
-                log(`[Backfill] 🔍 ${policyLabel} — found ${mappings.length} recording(s) on ${phone}`);
+              } catch (err) {
+                log(`[Backfill] ⚠ Scrape failed for ${phone}: ${err.message}`);
               }
-            } catch (err) {
-              log(`[Backfill] ⚠ Scrape failed for ${phone}: ${err.message}`);
             }
           }
         }
 
-        if (allCdrs.length === 0) {
+        if (allCdrs.length === 0 && !voiceSigOnly) {
           log(`[Backfill] — ${policyLabel} — no recordings found`);
           activeRun.stats.noRecordings++;
           await markPolicyProcessed(runId, policy.id, "no_recordings");
@@ -184,10 +191,12 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           continue;
         }
 
-        // Attach each recording to the policy (Potentials)
+        // Attach each recording to the policy (Potentials) — skip in voiceSigOnly mode
         let policyAttached = 0;
         let policySkipped = 0;
         let policyErrors = 0;
+
+        if (!voiceSigOnly) {
 
         for (const cdr of allCdrs) {
           // Ensure we have a recordsId
@@ -239,6 +248,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         }
 
         activeRun.stats.skipped += policySkipped;
+        } // end if (!voiceSigOnly) regular recordings block
         activeRun.stats.processed++;
 
         // ── Enrollment 3-way call recordings ─────────────────────────────────
