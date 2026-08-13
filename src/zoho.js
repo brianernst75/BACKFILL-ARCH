@@ -183,7 +183,7 @@ export async function getVoiceSignaturePoliciesByDateRange(startDate, endDate) {
  */
 export async function deleteZohoAttachment(module, recordId, attachmentId) {
   const token = await getAccessToken();
-  const url = `${API_DOMAIN}/crm/v6/${module}/${recordId}/Attachments/${attachmentId}`;
+  const url = `${API_DOMAIN}/crm/v2/${module}/${recordId}/Attachments/${attachmentId}`;
   const res = await fetch(url, {
     method: "DELETE",
     headers: {
@@ -198,6 +198,26 @@ export async function deleteZohoAttachment(module, recordId, attachmentId) {
  * Get all attachments for a Zoho record.
  */
 export async function getZohoAttachments(module, recordId) {
-  const data = await zohoGet(`${module}/${recordId}/Attachments`);
-  return data.data || [];
+  const token = await getAccessToken();
+  let page = 1;
+  let allAttachments = [];
+  let hasMore = true;
+  while (hasMore) {
+    const url = new URL(`${API_DOMAIN}/crm/v2/${module}/${recordId}/Attachments`);
+    url.searchParams.set("per_page", "200");
+    url.searchParams.set("page", page);
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        "X-CRM-ORG": ORG_ID,
+      },
+    });
+    const data = await res.json();
+    if (!data.data || data.data.length === 0) break;
+    allAttachments = allAttachments.concat(data.data);
+    hasMore = data.info?.more_records === true;
+    page++;
+    if (page > 10) break;
+  }
+  return allAttachments;
 }
