@@ -135,6 +135,15 @@ app.get("/debug/cdr-html", async (req, res) => {
   }
 });
 
+// Debug — see raw Zoho attachments for a policy
+app.get("/debug/attachments/:policyId", async (req, res) => {
+  try {
+    const { getZohoAttachments } = await import("./zoho.js");
+    const attachments = await getZohoAttachments("Potentials", req.params.policyId);
+    res.json({ count: attachments.length, attachments });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // Healthcheck — always responds 200 so Railway never kills the container during long fetches
 app.get("/healthcheck", (req, res) => res.status(200).send("ok"));
 
