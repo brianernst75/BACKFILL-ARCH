@@ -42,7 +42,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
     done: false,
     cancelled: false,
     voiceSigOnly,
-    stats: { total: 0, processed: 0, attached: 0, skipped: 0, errors: 0, noPhone: 0, noRecordings: 0 },
+    stats: { total: 0, processed: 0, attached: 0, prevAttached: 0, skipped: 0, errors: 0, noPhone: 0, noRecordings: 0 },
   };
 
   await saveBackfillRun({
@@ -226,6 +226,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
             const result = await attachRecordingToZoho("Potentials", policy.id, cdr.uniqueId, null, policy.Deal_Name, session);
             if (result.skipped) {
               policySkipped++;
+              log(`[Backfill] 🔵 ${policyLabel} — recording previously attached`);
             } else {
               policyAttached++;
               activeRun.stats.attached++;
@@ -404,6 +405,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 const result = await attachRecordingToZoho("Potentials", policy.id, enrollCdr.uniqueId, null, policy.Deal_Name, session);
                 if (result.skipped) {
                   enrollSkipped++;
+                  activeRun.stats.prevAttached++;
                   log(`[Backfill] 🔵 ${policyLabel} — enrollment recording previously attached`);
                 } else {
                   enrollAttached++;
