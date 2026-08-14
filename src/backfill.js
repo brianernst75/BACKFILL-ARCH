@@ -278,26 +278,34 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           } else {
             log(`[Backfill] 🔍 DEBUG found ${clientCallCdrs.length} client call CDR(s) for ${phones.join(", ")}`);
 
-            // For each client call, look for an 800 enrollment call that started after it ended
-            for (const clientCdr of clientCallCdrs) {
-              const callEnd = new Date(new Date(clientCdr.dateTimeIso).getTime() + clientCdr.durationSeconds * 1000);
-              const callEndIso = callEnd.toISOString();
+            const { AGENT_DIDS, AGENT_EXTENSIONS, RING_GROUPS } = await import("./config.js");
 
-              // Find 800-number calls that started within 30 minutes after this client call ended
-              const thirtyMinLater = new Date(callEnd.getTime() + 30 * 60 * 1000).toISOString();
+            // For each client call, find the next 800 outbound call by the same agent
+            for (const clientCdr of clientCallCdrs) {
+              const clientCallStart = clientCdr.dateTimeIso;
+
+              // Determine which side is the agent on the client call
+              const cFrom = normalizePhone(clientCdr.from);
+              const cTo   = normalizePhone(clientCdr.to);
+              const fromIsAgent = AGENT_DIDS.has(cFrom) || AGENT_EXTENSIONS.has(cFrom) || RING_GROUPS.has(cFrom);
+              const agentSide = fromIsAgent ? cFrom : cTo;
+
+              if (!agentSide) continue;
+
+              // Find the next outbound call this agent made to one of the two 800 numbers
+              // after this client call started — no time window, just the next one
               const enrollmentCdrs = await db.collection("cdrs").find({
                 status: "Answered",
                 durationSeconds: { $gt: 0 },
-                dateTimeIso: { $gte: callEndIso, $lte: thirtyMinLater },
+                dateTimeIso: { $gte: clientCallStart, $lte: dayEnd },
+                normalizedFrom: agentSide,
                 $or: [
                   { normalizedTo: "8009850245" },
                   { normalizedTo: "8887252832" },
-                  { normalizedFrom: "8009850245" },
-                  { normalizedFrom: "8887252832" },
                 ],
-              }).toArray();
+              }).sort({ dateTimeIso: 1 }).limit(1).toArray();
 
-              log(`[Backfill] 🔍 DEBUG clientCdr from=${clientCdr.from} to=${clientCdr.to} ended=${callEndIso} enrollmentCdrs=${enrollmentCdrs.length}`);
+              log(`[Backfill] 🔍 DEBUG clientCdr from=${clientCdr.from} to=${clientCdr.to} agentSide=${agentSide} started=${clientCallStart} enrollmentCdrs=${enrollmentCdrs.length}`);
 
               for (const enrollCdr of enrollmentCdrs) {
                 log(`[Backfill] 📞 ${policyLabel} — enrollment match: client ${phones[0]}, 800 call ${enrollCdr.to || enrollCdr.from}`);
