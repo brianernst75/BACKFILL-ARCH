@@ -273,12 +273,11 @@ async function getVoiceSigPolicies(date, token) {
   }
 }
 
-async function getContactPhones(contactId, token) {
-  const res = await fetch(ZOHO_API_DOMAIN + "/crm/v6/Contacts/" + contactId, { headers: { Authorization: "Zoho-oauthtoken " + token, "X-CRM-ORG": ZOHO_ORG_ID_VAL } });
-  const data = await res.json();
-  const c = data.data?.[0];
-  if (!c) return [];
+async function getContactPhones(contactId) {
+  const { zohoGetById } = await import("./zoho.js");
   const { normalizePhone } = await import("./config.js");
+  const c = await zohoGetById("Contacts", contactId);
+  if (!c) return [];
   return [c.Inbound_Phone, c.Phone, c.Alternate_Phone, c.Mobile, c.Other_Phone, c.Home_Phone]
     .map(p => p ? normalizePhone(p) : null).filter(p => p && p.length === 10);
 }
