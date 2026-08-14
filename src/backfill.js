@@ -304,11 +304,16 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               // The from field looks like "<16363660665>" — normalize it to get the 10-digit DID.
               const agentDid = normalizePhone(enrollCdr.from);
 
-              // Find client calls by THIS specific agent (by DID) before the 800 call start.
+              // Restrict to the same date as the enrollment call (start of day to 800 call start).
+              const enrollDate = enrollCdr.dateTimeIso.slice(0, 10); // YYYY-MM-DD
+              const dayStart = `${enrollDate}T00:00:00.000Z`;
+
+              // Find client calls by THIS specific agent (by DID or extension) on the same date,
+              // before the 800 call start.
               const candidates = await db.collection("cdrs").find({
                 status: "Answered",
                 durationSeconds: { $gt: 0 },
-                dateTimeIso: { $lte: lookbackEnd },
+                dateTimeIso: { $gte: dayStart, $lte: lookbackEnd },
                 $or: [
                   { normalizedFrom: agentDid },
                   { normalizedTo: agentDid },
@@ -349,6 +354,9 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               });
 
               log(`[Backfill] 🔍 DEBUG enrollCdr from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt} agentDid=${agentDid} before=${lookbackEnd} candidates=${candidates.length} clientCdrs=${clientCdrs.length}`);
+              clientCdrs.forEach((c, i) => {
+                log(`[Backfill] 🔍 DEBUG   clientCdr[${i}] from=${c.from} to=${c.to} dateTimeIso=${c.dateTimeIso} duration=${c.durationSeconds}s normalizedFrom=${c.normalizedFrom} normalizedTo=${c.normalizedTo}`);
+              });
 
               if (clientCdrs.length === 0) continue;
 
