@@ -355,46 +355,45 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
 
               // Get recordsId — use stored one or scrape by destination number
               let recordsId = enrollCdr.recordsId || await getRecordsId(enrollCdr.uniqueId);
-                if (!recordsId) {
-                  try {
-                    const eDate = (enrollCdr.dateTimeIso || "").split("T")[0];
-                    const destPhone = enrollCdr.normalizedTo === "8009850245" || enrollCdr.normalizedTo === "8887252832"
-                      ? enrollCdr.normalizedTo : enrollCdr.normalizedFrom;
-                    const mappings = await session.scrapeRecordsIdsByPhone(destPhone, eDate, eDate);
-                    if (mappings.length > 0) {
-                      await storeRecordsIds(mappings);
-                      const match = mappings.find(m => m.uniqueId === enrollCdr.uniqueId);
-                      if (match) recordsId = match.recordsId;
-                    }
-                  } catch (_) {}
-                }
-
-                if (!recordsId) {
-                  log(`[Backfill] ⚠ No recordsId for enrollment CDR ${enrollCdr.uniqueId} — skipping`);
-                  continue;
-                }
-
+              if (!recordsId) {
                 try {
-                  const result = await attachRecordingToZoho("Potentials", policy.id, enrollCdr.uniqueId, null, policy.Deal_Name, session);
-                  if (result.skipped) {
-                    enrollSkipped++;
-                    log(`[Backfill] ↩ ${policyLabel} — enrollment recording already attached, skipping`);
-                  } else {
-                    enrollAttached++;
-                    activeRun.stats.attached++;
-                    log(`[Backfill] 📞 ${policyLabel} — enrollment recording attached ✅`);
+                  const eDate = (enrollCdr.dateTimeIso || "").split("T")[0];
+                  const destPhone = enrollCdr.normalizedTo === "8009850245" || enrollCdr.normalizedTo === "8887252832"
+                    ? enrollCdr.normalizedTo : enrollCdr.normalizedFrom;
+                  const mappings = await session.scrapeRecordsIdsByPhone(destPhone, eDate, eDate);
+                  if (mappings.length > 0) {
+                    await storeRecordsIds(mappings);
+                    const match = mappings.find(m => m.uniqueId === enrollCdr.uniqueId);
+                    if (match) recordsId = match.recordsId;
                   }
-                } catch (err) {
-                  log(`[Backfill] ⚠ Enrollment attach failed for ${enrollCdr.uniqueId}: ${err.message}`);
-                  activeRun.stats.errors++;
-                  policyErrors++;
-                  const errDb = await getDb();
-                  await errDb.collection("backfill_errors").insertOne({
-                    runId, policyId: policy.id, policyName: policy.Deal_Name,
-                    uniqueId: enrollCdr.uniqueId, error: err.message,
-                    failedAt: new Date(), type: "enrollment",
-                  });
+                } catch (_) {}
+              }
+
+              if (!recordsId) {
+                log(`[Backfill] ⚠ No recordsId for enrollment CDR ${enrollCdr.uniqueId} — skipping`);
+                continue;
+              }
+
+              try {
+                const result = await attachRecordingToZoho("Potentials", policy.id, enrollCdr.uniqueId, null, policy.Deal_Name, session);
+                if (result.skipped) {
+                  enrollSkipped++;
+                  log(`[Backfill] ↩ ${policyLabel} — enrollment recording already attached, skipping`);
+                } else {
+                  enrollAttached++;
+                  activeRun.stats.attached++;
+                  log(`[Backfill] 📞 ${policyLabel} — enrollment recording attached ✅`);
                 }
+              } catch (err) {
+                log(`[Backfill] ⚠ Enrollment attach failed for ${enrollCdr.uniqueId}: ${err.message}`);
+                activeRun.stats.errors++;
+                policyErrors++;
+                const errDb = await getDb();
+                await errDb.collection("backfill_errors").insertOne({
+                  runId, policyId: policy.id, policyName: policy.Deal_Name,
+                  uniqueId: enrollCdr.uniqueId, error: err.message,
+                  failedAt: new Date(), type: "enrollment",
+                });
               } // end attach try/catch
             } // end for enrollCdr
           } // end else
