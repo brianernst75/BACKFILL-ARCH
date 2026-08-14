@@ -314,17 +314,14 @@ app.post("/enroll-cdr/start", async (req, res) => {
       broadcastLog("[EnrollCDR] Processing " + date + "...");
       try {
         const { getVoiceSignaturePoliciesByDateRange } = await import("./zoho.js");
-        const allPoliciesForDate = await getVoiceSignaturePoliciesByDateRange(date, date);
-        // Only process UHC and Humana — only these carriers use 3-way enrollment calls
-        const ENROLL_CARRIERS = new Set(["United Healthcare", "Humana"]);
-        const policies = allPoliciesForDate.filter(p => ENROLL_CARRIERS.has(p.Insurance_Company));
+        const policies = await getVoiceSignaturePoliciesByDateRange(date, date);
 
         if (policies.length === 0) {
-          broadcastLog("[EnrollCDR] " + date + " — no UHC/Humana Voice Signature policies");
+          broadcastLog("[EnrollCDR] " + date + " — no Voice Signature policies");
           enrollCompletedDates.add(date); continue;
         }
 
-        broadcastLog("[EnrollCDR] " + date + " — found " + policies.length + " UHC/Humana Voice Sig policy/policies");
+        broadcastLog("[EnrollCDR] " + date + " — found " + policies.length + " Voice Sig policy/policies");
 
         const clientPhones = new Set();
         for (const policy of policies) {
