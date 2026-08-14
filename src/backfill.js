@@ -256,7 +256,8 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         // preceding client call by that agent — including ring group inbound calls
         // by parsing the destination field for the client phone number.
         // Only Humana (8009850245) and UHC (8887252832) use 3-way enrollment calls.
-        if (policy.Application_Date && policy.Smoker_Status === "Yes") {
+        const enrollCarriers = new Set(["United Healthcare", "Humana"]);
+        if (policy.Application_Date && policy.Smoker_Status === "Yes" && enrollCarriers.has(policy.Insurance_Company)) {
           const ENROLLMENT_NUMBERS = new Set(["8009850245", "8887252832"]);
           const { normalizePhone, AGENT_DIDS, AGENT_EXTENSIONS, RING_GROUPS, INBOUND_DIDS } = await import("./config.js");
           const db = await getDb();
