@@ -364,6 +364,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                   ]),
                 }).sort({ dateTimeIso: -1 }).limit(5).toArray();
 
+                log(`[Backfill] 🔍 DEBUG rg fallback: agentSide=${agentSide} ringGroupCdrs=${ringGroupCdrs.length}`);
                 for (const rgCdr of ringGroupCdrs) {
                   const rgFrom = normalizePhone(rgCdr.from);
                   const rgTo   = normalizePhone(rgCdr.to);
@@ -371,6 +372,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                   const hasRingGroup = RING_GROUPS.has(rgFrom) || RING_GROUPS.has(rgTo);
                   const hasAgent = rgFrom === agentSide || rgTo === agentSide ||
                                    rgCdr.agentExtension === agentSide;
+                  log(`[Backfill] 🔍 DEBUG rg CDR: from=${rgCdr.from} to=${rgCdr.to} rgFrom=${rgFrom} rgTo=${rgTo} hasRingGroup=${hasRingGroup} hasAgent=${hasAgent}`);
                   if (!hasRingGroup || !hasAgent) continue;
                   // Check destination field contains one of our policy phones
                   const destText = rgCdr.destination || "";
