@@ -274,9 +274,9 @@ async function getVoiceSigPolicies(date, token) {
 }
 
 async function getContactPhones(contactId) {
-  const { zohoGetById } = await import("./zoho.js");
+  const { getContactPhoneFields } = await import("./zoho.js");
   const { normalizePhone } = await import("./config.js");
-  const c = await zohoGetById("Contacts", contactId);
+  const c = await getContactPhoneFields(contactId);
   if (!c) return [];
   return [c.Inbound_Phone, c.Phone, c.Alternate_Phone, c.Mobile, c.Other_Phone, c.Home_Phone]
     .map(p => p ? normalizePhone(p) : null).filter(p => p && p.length === 10);

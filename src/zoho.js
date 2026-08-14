@@ -179,6 +179,16 @@ export async function getVoiceSignaturePoliciesByDateRange(startDate, endDate) {
 }
 
 /**
+ * Fetch all phone fields for a Contact record.
+ */
+export async function getContactPhoneFields(contactId) {
+  const data = await zohoGet(`Contacts/${contactId}`, {
+    fields: "id,Phone,Mobile,Alternate_Phone,Other_Phone,Inbound_Phone,Home_Phone",
+  });
+  return data.data?.[0] || null;
+}
+
+/**
  * Delete an attachment from a Zoho record by attachment ID.
  */
 export async function deleteZohoAttachment(module, recordId, attachmentId) {
