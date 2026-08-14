@@ -252,12 +252,13 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         activeRun.stats.processed++;
 
         // ── Enrollment 3-way call recordings ─────────────────────────────────
-        // Starts from the CLIENT PHONE (from policy) and looks for an 800 enrollment call
-        // that happened right after their call ended on the application date.
+        // Starts from 800-number CDRs, identifies the agent, then finds the
+        // preceding client call by that agent — including ring group inbound calls
+        // by parsing the destination field for the client phone number.
         // Only Humana (8009850245) and UHC (8887252832) use 3-way enrollment calls.
         if (policy.Application_Date && policy.Smoker_Status === "Yes") {
           const ENROLLMENT_NUMBERS = new Set(["8009850245", "8887252832"]);
-          const { normalizePhone } = await import("./config.js");
+          const { normalizePhone, AGENT_DIDS, AGENT_EXTENSIONS, RING_GROUPS, INBOUND_DIDS } = await import("./config.js");
           const db = await getDb();
           let enrollAttached = 0;
           let enrollSkipped = 0;
@@ -265,64 +266,94 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           const dayStart = policy.Application_Date + "T00:00:00.000Z";
           const dayEnd   = policy.Application_Date + "T23:59:59.999Z";
 
-          // Find all client calls for this policy's phones on the application date
-          const clientCallCdrs = await db.collection("cdrs").find({
+          // Step 1: Find all 800-number CDRs on the application date
+          const enrollmentCdrs = await db.collection("cdrs").find({
             status: "Answered",
-            durationSeconds: { $gte: 60 },
+            durationSeconds: { $gt: 0 },
             dateTimeIso: { $gte: dayStart, $lte: dayEnd },
-            $or: phones.flatMap(p => [{ normalizedFrom: p }, { normalizedTo: p }]),
+            $or: [
+              { normalizedTo: "8009850245" },
+              { normalizedTo: "8887252832" },
+              { normalizedFrom: "8009850245" },
+              { normalizedFrom: "8887252832" },
+            ],
           }).toArray();
 
-          if (clientCallCdrs.length === 0) {
-            log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no client call CDRs in cache for ${policy.Application_Date}`);
+          if (enrollmentCdrs.length === 0) {
+            log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no enrollment CDRs in cache for ${policy.Application_Date}`);
           } else {
-            log(`[Backfill] 🔍 DEBUG found ${clientCallCdrs.length} client call CDR(s) for ${phones.join(", ")}`);
-
-            const { AGENT_DIDS, AGENT_EXTENSIONS, RING_GROUPS } = await import("./config.js");
-
-            // For each client call, find the next 800 outbound call by the same agent
-            for (const clientCdr of clientCallCdrs) {
-              const clientCallStart = clientCdr.dateTimeIso;
-
-              // Determine which side is the agent on the client call
-              const cFrom = normalizePhone(clientCdr.from);
-              const cTo   = normalizePhone(clientCdr.to);
-              const fromIsAgent = AGENT_DIDS.has(cFrom) || AGENT_EXTENSIONS.has(cFrom) || RING_GROUPS.has(cFrom);
-              const toIsAgent   = AGENT_DIDS.has(cTo)   || AGENT_EXTENSIONS.has(cTo)   || RING_GROUPS.has(cTo);
-              let agentSide = fromIsAgent ? cFrom : (toIsAgent ? cTo : null);
-
-              // For ring group inbound calls, use the stored agentExtension field
-              if ((!agentSide || RING_GROUPS.has(agentSide)) && clientCdr.agentExtension) {
-                agentSide = clientCdr.agentExtension;
-              }
-
+            for (const enrollCdr of enrollmentCdrs) {
+              // Step 2: Identify the agent from the 800 CDR
+              const eFrom = normalizePhone(enrollCdr.from);
+              const eTo   = normalizePhone(enrollCdr.to);
+              const fromIsEnroll = ENROLLMENT_NUMBERS.has(eFrom);
+              const agentSide = fromIsEnroll ? eTo : eFrom;
               if (!agentSide) continue;
 
-              // Find the next outbound call this agent made to one of the two 800 numbers
-              // after this client call started — no time window, just the next one
-              const enrollmentCdrs = await db.collection("cdrs").find({
+              // Step 3: Find the most recent call before this 800 call involving this agent
+              // This includes outbound calls (agent DID in from/to) AND
+              // inbound calls through ring groups (parse destination for client phone)
+              const enrollStart = enrollCdr.dateTimeIso;
+
+              // Get all calls involving this agent on this date before the 800 call
+              const precedingCdrs = await db.collection("cdrs").find({
                 status: "Answered",
-                durationSeconds: { $gt: 0 },
-                dateTimeIso: { $gte: clientCallStart, $lte: dayEnd },
+                durationSeconds: { $gte: 60 },
+                dateTimeIso: { $gte: dayStart, $lt: enrollStart },
                 $or: [
                   { normalizedFrom: agentSide },
+                  { normalizedTo: agentSide },
                   { agentExtension: agentSide },
                 ],
-                $and: [
-                  { $or: [
-                    { normalizedTo: "8009850245" },
-                    { normalizedTo: "8887252832" },
-                  ]},
-                ],
-              }).sort({ dateTimeIso: 1 }).limit(1).toArray();
+              }).sort({ dateTimeIso: -1 }).limit(10).toArray();
 
-              log(`[Backfill] 🔍 DEBUG clientCdr from=${clientCdr.from} to=${clientCdr.to} agentSide=${agentSide} started=${clientCallStart} enrollmentCdrs=${enrollmentCdrs.length}`);
+              // Step 4: Extract client phone from each preceding CDR
+              // For outbound calls: other side is the client
+              // For ring group inbound: parse client phone from destination field
+              let clientPhone = null;
+              for (const preCdr of precedingCdrs) {
+                const pFrom = normalizePhone(preCdr.from);
+                const pTo   = normalizePhone(preCdr.to);
+                const fromIsAgent = AGENT_DIDS.has(pFrom) || AGENT_EXTENSIONS.has(pFrom) || RING_GROUPS.has(pFrom);
+                const toIsAgent   = AGENT_DIDS.has(pTo)   || AGENT_EXTENSIONS.has(pTo)   || RING_GROUPS.has(pTo);
 
-              for (const enrollCdr of enrollmentCdrs) {
-                log(`[Backfill] 📞 ${policyLabel} — enrollment match: client ${phones[0]}, 800 call ${enrollCdr.to || enrollCdr.from}`);
+                let candidate = null;
+                if (fromIsAgent && !toIsAgent && pTo && pTo.length === 10) {
+                  candidate = pTo; // outbound: agent called client
+                } else if (!fromIsAgent && toIsAgent && pFrom && pFrom.length === 10) {
+                  candidate = pFrom; // inbound: client called agent directly
+                } else if (toIsAgent || RING_GROUPS.has(pTo)) {
+                  // Ring group inbound — parse client phone from destination field
+                  if (preCdr.destination) {
+                    const destMatch = preCdr.destination.match(/\+?1?(\d{10})/);
+                    if (destMatch) candidate = destMatch[1].slice(-10);
+                  }
+                  // Also try normalizedFrom if it's a 10-digit external number
+                  if (!candidate && pFrom && pFrom.length === 10 &&
+                      !AGENT_DIDS.has(pFrom) && !AGENT_EXTENSIONS.has(pFrom) &&
+                      !RING_GROUPS.has(pFrom) && !INBOUND_DIDS.has(pFrom) &&
+                      !ENROLLMENT_NUMBERS.has(pFrom)) {
+                    candidate = pFrom;
+                  }
+                }
 
-                // Get recordsId — use stored one or scrape by destination number
-                let recordsId = enrollCdr.recordsId || await getRecordsId(enrollCdr.uniqueId);
+                if (!candidate) continue;
+                if (INBOUND_DIDS.has(candidate) || ENROLLMENT_NUMBERS.has(candidate)) continue;
+
+                // Check if this candidate phone belongs to this policy
+                if (phones.includes(candidate)) {
+                  clientPhone = candidate;
+                  log(`[Backfill] 🔍 DEBUG enrollCdr to=${enrollCdr.to} agentSide=${agentSide} preCdr from=${preCdr.from} to=${preCdr.to} clientPhone=${clientPhone}`);
+                  break;
+                }
+              }
+
+              if (!clientPhone) continue;
+
+              log(`[Backfill] 📞 ${policyLabel} — enrollment match: client ${clientPhone}, 800 call ${enrollCdr.to || enrollCdr.from}`);
+
+              // Get recordsId — use stored one or scrape by destination number
+              let recordsId = enrollCdr.recordsId || await getRecordsId(enrollCdr.uniqueId);
                 if (!recordsId) {
                   try {
                     const eDate = (enrollCdr.dateTimeIso || "").split("T")[0];
@@ -363,8 +394,8 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                     failedAt: new Date(), type: "enrollment",
                   });
                 }
-              } // end for enrollCdr
-            } // end for clientCdr
+              } // end attach try/catch
+            } // end for enrollCdr
           } // end else
 
           if (enrollAttached > 0) policyAttached += enrollAttached;
