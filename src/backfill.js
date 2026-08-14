@@ -296,20 +296,17 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
 
               if (!agentExt) continue;
 
-              // The client call is active when the agent dials the 800 number (3-way call).
-              // Find calls that started before the 800 call within a 30-min lookback window.
+              // Find the client call the agent was on immediately before dialing the 800 number.
               const enrollStart = new Date(enrollCdr.dateTimeIso);
-              const THIRTY_MIN_MS = 30 * 60 * 1000;
-              const lookbackStart = new Date(enrollStart.getTime() - THIRTY_MIN_MS).toISOString();
-              const lookbackEnd   = enrollStart.toISOString();
+              const lookbackEnd = enrollStart.toISOString();
 
-              // Get all calls in the 30-min window before the 800 call.
-              // CDRs scraped by client phone store the agent's DID, not extension.
-              // So we pull ALL calls in the window and filter by agent identity below.
+              // Find all client calls by this agent before the 800 call start.
+              // Sort by start time descending and take the first one —
+              // that's the call the agent was on immediately before dialing the 800 number.
               const candidates = await db.collection("cdrs").find({
                 status: "Answered",
                 durationSeconds: { $gt: 0 },
-                dateTimeIso: { $gte: lookbackStart, $lte: lookbackEnd },
+                dateTimeIso: { $lte: lookbackEnd },
               }).toArray();
 
               // Filter: find calls where one side is the agent (by extension OR DID)
@@ -335,20 +332,22 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 // Other side must not be an inbound DID or enrollment number
                 if (INBOUND_DIDS.has(otherSide) || ENROLLMENT_NUMBERS.has(otherSide)) return false;
 
+                // Must be at least 60 seconds — ignore short/dropped calls
+                if (c.durationSeconds < 60) return false;
+
                 // The phone match below (phones.includes(clientPhone)) ensures
                 // we only attach to the correct policy — no need to match agent identity here
                 return true;
               });
 
-              log(`[Backfill] 🔍 DEBUG enrollCdr from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt} lookback=${lookbackStart} → ${lookbackEnd} candidates=${candidates.length} clientCdrs=${clientCdrs.length}`);
+              log(`[Backfill] 🔍 DEBUG enrollCdr from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt} before=${lookbackEnd} candidates=${candidates.length} clientCdrs=${clientCdrs.length}`);
 
               if (clientCdrs.length === 0) continue;
 
-              // Take the client call whose end time is closest to the 800 call start
+              // Take the client call that started most recently before the 800 call —
+              // that's the call the agent was on immediately before dialing the enrollment number.
               clientCdrs.sort((a, b) => {
-                const aEnd = new Date(a.dateTimeIso).getTime() + a.durationSeconds * 1000;
-                const bEnd = new Date(b.dateTimeIso).getTime() + b.durationSeconds * 1000;
-                return bEnd - aEnd;
+                return new Date(b.dateTimeIso) - new Date(a.dateTimeIso);
               });
 
               const clientCdr = clientCdrs[0];
