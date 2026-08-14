@@ -350,6 +350,36 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 }
               }
 
+              // Fallback: if no preceding CDR found, check ring group CDRs
+              // where the destination field contains one of this policy's phones.
+              // This catches inbound calls through ring groups where the agent extension
+              // doesn't appear in normalizedFrom/normalizedTo.
+              if (!clientPhone) {
+                const ringGroupCdrs = await db.collection("cdrs").find({
+                  status: "Answered",
+                  dateTimeIso: { $gte: dayStart, $lt: enrollStart },
+                  $or: phones.flatMap(p => [
+                    { destination: { $regex: p } },
+                  ]),
+                }).sort({ dateTimeIso: -1 }).limit(5).toArray();
+
+                for (const rgCdr of ringGroupCdrs) {
+                  const rgFrom = normalizePhone(rgCdr.from);
+                  const rgTo   = normalizePhone(rgCdr.to);
+                  // Must involve a ring group or agent on one side
+                  if (!RING_GROUPS.has(rgTo) && !RING_GROUPS.has(rgFrom) &&
+                      !AGENT_EXTENSIONS.has(rgTo) && !AGENT_EXTENSIONS.has(rgFrom)) continue;
+                  // Check destination field contains one of our policy phones
+                  const destText = rgCdr.destination || "";
+                  const matchedPhone = phones.find(p => destText.includes(p));
+                  if (matchedPhone) {
+                    clientPhone = matchedPhone;
+                    log(`[Backfill] 🔍 DEBUG ring group fallback: enrollCdr to=${enrollCdr.to} agentSide=${agentSide} rgCdr from=${rgCdr.from} to=${rgCdr.to} clientPhone=${clientPhone}`);
+                    break;
+                  }
+                }
+              }
+
               if (!clientPhone) continue;
 
               // Skip if this enrollment recording was already attached to another policy this run
