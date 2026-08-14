@@ -288,7 +288,13 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               const cFrom = normalizePhone(clientCdr.from);
               const cTo   = normalizePhone(clientCdr.to);
               const fromIsAgent = AGENT_DIDS.has(cFrom) || AGENT_EXTENSIONS.has(cFrom) || RING_GROUPS.has(cFrom);
-              const agentSide = fromIsAgent ? cFrom : cTo;
+              const toIsAgent   = AGENT_DIDS.has(cTo)   || AGENT_EXTENSIONS.has(cTo)   || RING_GROUPS.has(cTo);
+              let agentSide = fromIsAgent ? cFrom : (toIsAgent ? cTo : null);
+
+              // For ring group inbound calls, use the stored agentExtension field
+              if ((!agentSide || RING_GROUPS.has(agentSide)) && clientCdr.agentExtension) {
+                agentSide = clientCdr.agentExtension;
+              }
 
               if (!agentSide) continue;
 
@@ -298,10 +304,15 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 status: "Answered",
                 durationSeconds: { $gt: 0 },
                 dateTimeIso: { $gte: clientCallStart, $lte: dayEnd },
-                normalizedFrom: agentSide,
                 $or: [
-                  { normalizedTo: "8009850245" },
-                  { normalizedTo: "8887252832" },
+                  { normalizedFrom: agentSide },
+                  { agentExtension: agentSide },
+                ],
+                $and: [
+                  { $or: [
+                    { normalizedTo: "8009850245" },
+                    { normalizedTo: "8887252832" },
+                  ]},
                 ],
               }).sort({ dateTimeIso: 1 }).limit(1).toArray();
 

@@ -200,12 +200,39 @@ export class IntegritelSession {
       // Skip first td (checkbox column)
       const tds = tdMatches.slice(1).map(m => m[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, "").trim());
 
-      const from = tds[0] || null;
-      const to = tds[1] || null;
+      // Extract raw HTML for from/to before stripping tags
+      // When a ring group routes to an agent, both appear in the same td
+      // e.g. "Agents_LeastRecent (350)\nLonnie VanHorn (223)"
+      // We want the agent extension, not the ring group
+      const fromRaw = tdMatches[1] ? tdMatches[1][1] : null;
+      const toRaw   = tdMatches[2] ? tdMatches[2][1] : null;
+
+      // Extract agent extension from td that may contain ring group + agent
+      function extractAgentFromTd(raw) {
+        if (!raw) return null;
+        const text = raw.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+        // If contains both a ring group and an agent, pick the agent (last name+ext pattern)
+        // Agent pattern: "Name (ext)" where ext is 3 digits
+        const agentMatch = text.match(/([A-Za-z].+?\(\d{3}\))\s*$/);
+        if (agentMatch) return agentMatch[1].trim();
+        return text || null;
+      }
+
+      const from = extractAgentFromTd(fromRaw);
+      const to   = extractAgentFromTd(toRaw);
       const dateTimeStr = tds[2] || null;
       const totalDurationStr = tds[4] || tds[3] || null;
       const status = tds[5] || null;
       const destination = tds[6] ? tds[6].replace(/[<>]/g, "").trim() : null;
+
+      // Also store the agentExtension separately for ring group calls
+      // This extracts the 3-digit extension from agent name like "Lonnie VanHorn (223)"
+      function extractExtension(str) {
+        if (!str) return null;
+        const m = str.match(/\((\d{3})\)/);
+        return m ? m[1] : null;
+      }
+      const agentExtension = extractExtension(from) || extractExtension(to) || null;
 
       // Parse date/time — format: "11-03-2025 06:48:54 PM"
       let dateTimeIso = null;
@@ -236,6 +263,7 @@ export class IntegritelSession {
         durationSeconds,
         status: status || "Answered",
         destination,
+        agentExtension,
         recordingAvailable: block.includes("cdr_rec_available"),
         cachedAt: new Date(),
         source: "playwright",
