@@ -282,6 +282,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
             ],
           }).toArray();
 
+          log(`[Backfill] 🔍 DEBUG enrollment check: ${policyLabel} carrier=${policy.Insurance_Company} enrollmentCdrs=${enrollmentCdrs.length}`);
           if (enrollmentCdrs.length === 0) {
             log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no enrollment CDRs in cache for ${policy.Application_Date}`);
           } else {
