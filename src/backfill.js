@@ -366,9 +366,11 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 for (const rgCdr of ringGroupCdrs) {
                   const rgFrom = normalizePhone(rgCdr.from);
                   const rgTo   = normalizePhone(rgCdr.to);
-                  // Must involve a ring group or agent on one side
-                  if (!RING_GROUPS.has(rgTo) && !RING_GROUPS.has(rgFrom) &&
-                      !AGENT_EXTENSIONS.has(rgTo) && !AGENT_EXTENSIONS.has(rgFrom)) continue;
+                  // Must involve the ring group on one side and the specific enrollment agent on the other
+                  const hasRingGroup = RING_GROUPS.has(rgFrom) || RING_GROUPS.has(rgTo);
+                  const hasAgent = rgFrom === agentSide || rgTo === agentSide ||
+                                   rgCdr.agentExtension === agentSide;
+                  if (!hasRingGroup || !hasAgent) continue;
                   // Check destination field contains one of our policy phones
                   const destText = rgCdr.destination || "";
                   const matchedPhone = phones.find(p => destText.includes(p));
