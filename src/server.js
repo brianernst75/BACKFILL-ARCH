@@ -379,14 +379,22 @@ app.post("/enroll-cdr/start", async (req, res) => {
           // Also scrape by the agent extensions for Humana/UHC policy owners.
           // This captures ring group inbound calls where the client phone appears
           // in the destination field but not in normalizedFrom/To.
-          // We look up each owner's extension from the CDRs we already scraped
-          // for the 800 numbers — the agent's extension appears in the from field.
+          // Use AGENT_DID_TO_EXT to resolve agent DIDs to extensions.
+          const { AGENT_DID_TO_EXT } = await import("./config.js");
           const agentExtsToScrape = new Set();
           for (const r of allRecords) {
-            // 800-number CDRs have agent ext in normalizedFrom
-            if (r.normalizedTo === "8009850245" || r.normalizedTo === "8887252832") {
-              if (r.normalizedFrom && r.normalizedFrom.length <= 4) {
-                agentExtsToScrape.add(r.normalizedFrom);
+            // 800-number CDRs have agent ext or DID in normalizedFrom
+            if (r.normalizedTo === "8009850245" || r.normalizedTo === "8887252832" ||
+                r.normalizedFrom === "8009850245" || r.normalizedFrom === "8887252832") {
+              const agentSide = (r.normalizedTo === "8009850245" || r.normalizedTo === "8887252832")
+                ? r.normalizedFrom : r.normalizedTo;
+              if (agentSide) {
+                if (agentSide.length <= 4) {
+                  agentExtsToScrape.add(agentSide); // already an extension
+                } else {
+                  const ext = AGENT_DID_TO_EXT.get(agentSide);
+                  if (ext) agentExtsToScrape.add(ext); // resolve DID to extension
+                }
               }
             }
             // Also grab agentExtension field if present
