@@ -37,9 +37,18 @@ async function getAccessToken() {
 export async function attachRecordingToZoho(module, recordId, uniqueId, filename, displayName, session) {
   const db = await getDb();
 
+  // Check if already attached to this specific record
   const existing = await db.collection("attachments").findOne({ uniqueId, recordId });
   if (existing) {
     return { success: true, skipped: true, attachmentId: existing.attachmentId };
+  }
+
+  // For enrollment recordings: check if this uniqueId is already attached to ANY record.
+  // The same enrollment call should never be attached to more than one policy.
+  const anyExisting = await db.collection("attachments").findOne({ uniqueId, status: "complete" });
+  if (anyExisting) {
+    console.log(`[Zoho] Skipping ${uniqueId} — already attached to ${anyExisting.module}/${anyExisting.recordId}`);
+    return { success: true, skipped: true, attachmentId: anyExisting.attachmentId };
   }
 
   const recordsId = await getRecordsId(uniqueId);

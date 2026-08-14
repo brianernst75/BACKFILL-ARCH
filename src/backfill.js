@@ -83,6 +83,8 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
     log(`[Backfill] Integritel session ready`);
 
     // 3. Process each policy
+    const usedUniqueIds = new Set(); // track uniqueIds already attached this run
+
     for (let i = 0; i < policies.length; i++) {
       if (activeRun.cancelled) {
         log(`[Backfill] ⛔ Cancelled at policy ${i + 1} of ${policies.length}`);
@@ -299,7 +301,6 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               // Get all calls involving this agent on this date before the 800 call
               const precedingCdrs = await db.collection("cdrs").find({
                 status: "Answered",
-                durationSeconds: { $gte: 60 },
                 dateTimeIso: { $gte: dayStart, $lt: enrollStart },
                 $or: [
                   { normalizedFrom: agentSide },
@@ -351,6 +352,12 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
 
               if (!clientPhone) continue;
 
+              // Skip if this enrollment recording was already attached to another policy this run
+              if (usedUniqueIds.has(enrollCdr.uniqueId)) {
+                log(`[Backfill] ↩ ${policyLabel} — enrollment CDR ${enrollCdr.uniqueId} already attached this run, skipping`);
+                continue;
+              }
+
               log(`[Backfill] 📞 ${policyLabel} — enrollment match: client ${clientPhone}, 800 call ${enrollCdr.to || enrollCdr.from}`);
 
               // Get recordsId — use stored one or scrape by destination number
@@ -382,6 +389,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 } else {
                   enrollAttached++;
                   activeRun.stats.attached++;
+                  usedUniqueIds.add(enrollCdr.uniqueId);
                   log(`[Backfill] 📞 ${policyLabel} — enrollment recording attached ✅`);
                 }
               } catch (err) {
