@@ -281,8 +281,6 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               { normalizedFrom: "8887252832" },
             ],
           }).toArray();
-
-          log(`[Backfill] 🔍 DEBUG enrollment check: ${policyLabel} carrier=${policy.Insurance_Company} enrollmentCdrs=${enrollmentCdrs.length}`);
           if (enrollmentCdrs.length === 0) {
             log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no enrollment CDRs in cache for ${policy.Application_Date}`);
           } else {
@@ -346,7 +344,6 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 // Check if this candidate phone belongs to this policy
                 if (phones.includes(candidate)) {
                   clientPhone = candidate;
-                  log(`[Backfill] 🔍 DEBUG enrollCdr to=${enrollCdr.to} agentSide=${agentSide} preCdr from=${preCdr.from} to=${preCdr.to} clientPhone=${clientPhone}`);
                   break;
                 }
               }
@@ -363,8 +360,6 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                     { destination: { $regex: p } },
                   ]),
                 }).sort({ dateTimeIso: -1 }).limit(5).toArray();
-
-                log(`[Backfill] 🔍 DEBUG rg fallback: agentSide=${agentSide} ringGroupCdrs=${ringGroupCdrs.length}`);
                 for (const rgCdr of ringGroupCdrs) {
                   const rgFrom = normalizePhone(rgCdr.from);
                   const rgTo   = normalizePhone(rgCdr.to);
@@ -372,14 +367,12 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                   const hasRingGroup = RING_GROUPS.has(rgFrom) || RING_GROUPS.has(rgTo);
                   const hasAgent = rgFrom === agentSide || rgTo === agentSide ||
                                    rgCdr.agentExtension === agentSide;
-                  log(`[Backfill] 🔍 DEBUG rg CDR: from=${rgCdr.from} to=${rgCdr.to} rgFrom=${rgFrom} rgTo=${rgTo} hasRingGroup=${hasRingGroup} hasAgent=${hasAgent}`);
                   if (!hasRingGroup || !hasAgent) continue;
                   // Check destination field contains one of our policy phones
                   const destText = rgCdr.destination || "";
                   const matchedPhone = phones.find(p => destText.includes(p));
                   if (matchedPhone) {
                     clientPhone = matchedPhone;
-                    log(`[Backfill] 🔍 DEBUG ring group fallback: enrollCdr to=${enrollCdr.to} agentSide=${agentSide} rgCdr from=${rgCdr.from} to=${rgCdr.to} clientPhone=${clientPhone}`);
                     break;
                   }
                 }
