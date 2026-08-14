@@ -300,13 +300,21 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               const enrollStart = new Date(enrollCdr.dateTimeIso);
               const lookbackEnd = enrollStart.toISOString();
 
-              // Find all client calls by this agent before the 800 call start.
-              // Sort by start time descending and take the first one —
-              // that's the call the agent was on immediately before dialing the 800 number.
+              // Extract the agent's DID from the enrollment CDR's from field.
+              // The from field looks like "<16363660665>" — normalize it to get the 10-digit DID.
+              const agentDid = normalizePhone(enrollCdr.from);
+
+              // Find client calls by THIS specific agent (by DID) before the 800 call start.
               const candidates = await db.collection("cdrs").find({
                 status: "Answered",
                 durationSeconds: { $gt: 0 },
                 dateTimeIso: { $lte: lookbackEnd },
+                $or: [
+                  { normalizedFrom: agentDid },
+                  { normalizedTo: agentDid },
+                  { normalizedFrom: agentExt },
+                  { normalizedTo: agentExt },
+                ],
               }).toArray();
 
               // Filter: find calls where one side is the agent (by extension OR DID)
@@ -340,7 +348,7 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 return true;
               });
 
-              log(`[Backfill] 🔍 DEBUG enrollCdr from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt} before=${lookbackEnd} candidates=${candidates.length} clientCdrs=${clientCdrs.length}`);
+              log(`[Backfill] 🔍 DEBUG enrollCdr from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt} agentDid=${agentDid} before=${lookbackEnd} candidates=${candidates.length} clientCdrs=${clientCdrs.length}`);
 
               if (clientCdrs.length === 0) continue;
 
