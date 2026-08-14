@@ -405,7 +405,6 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 const result = await attachRecordingToZoho("Potentials", policy.id, enrollCdr.uniqueId, null, policy.Deal_Name, session);
                 if (result.skipped) {
                   enrollSkipped++;
-                  activeRun.stats.prevAttached++;
                   log(`[Backfill] 🔵 ${policyLabel} — enrollment recording previously attached`);
                 } else {
                   enrollAttached++;
@@ -427,7 +426,10 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
           }
 
           if (enrollAttached > 0) policyAttached += enrollAttached;
-          if (enrollSkipped > 0) policySkipped += enrollSkipped;
+          if (enrollSkipped > 0) {
+            policySkipped += enrollSkipped;
+            activeRun.stats.prevAttached++;
+          }
         }
 
         const status = policyAttached > 0 ? "done" : (policySkipped > 0 ? "skipped" : "no_recordings");
