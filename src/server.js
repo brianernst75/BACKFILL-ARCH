@@ -242,13 +242,43 @@ let enrollPreloadActive = false;
 let enrollPreloadCancelled = false;
 let enrollCompletedDates = new Set();
 
+const ZOHO_CLIENT_ID = process.env.ZOHO_CLIENT_ID;
+const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
+const ZOHO_REFRESH_TOKEN = process.env.ZOHO_REFRESH_TOKEN;
+const ZOHO_API_DOMAIN = process.env.ZOHO_API_DOMAIN || "https://www.zohoapis.com";
+const ZOHO_ORG_ID_VAL = process.env.ZOHO_ORG_ID;
 const ENROLLMENT_NUMBERS = ["8009850245", "8887252832"];
 
-async function getContactPhones(contactId) {
-  const { zohoGetById } = await import("./zoho.js");
-  const { normalizePhone } = await import("./config.js");
-  const c = await zohoGetById("Contacts", contactId);
+async function getEnrollZohoToken() {
+  const params = new URLSearchParams({ grant_type: "refresh_token", client_id: ZOHO_CLIENT_ID, client_secret: ZOHO_CLIENT_SECRET, refresh_token: ZOHO_REFRESH_TOKEN });
+  const res = await fetch("https://accounts.zoho.com/oauth/v2/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: params.toString() });
+  const data = await res.json();
+  if (!data.access_token) throw new Error("Zoho token failed");
+  return data.access_token;
+}
+
+async function getVoiceSigPolicies(date, token) {
+  const url = new URL(ZOHO_API_DOMAIN + "/crm/v6/Potentials/search");
+  url.searchParams.set("criteria", "((Coverage_Type:equals:Medicare Advantage)and(Smoker_Status:equals:Yes)and(Application_Date:equals:" + date + "))");
+  url.searchParams.set("fields", "id,Deal_Name,Contact_Name,Owner,Application_Date");
+  url.searchParams.set("per_page", "200");
+  const res = await fetch(url, { headers: { Authorization: "Zoho-oauthtoken " + token, "X-CRM-ORG": ZOHO_ORG_ID_VAL } });
+  const text = await res.text();
+  if (!text || text.trim() === "") return [];
+  try {
+    const data = JSON.parse(text);
+    return data.data || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+async function getContactPhones(contactId, token) {
+  const res = await fetch(ZOHO_API_DOMAIN + "/crm/v6/Contacts/" + contactId, { headers: { Authorization: "Zoho-oauthtoken " + token, "X-CRM-ORG": ZOHO_ORG_ID_VAL } });
+  const data = await res.json();
+  const c = data.data?.[0];
   if (!c) return [];
+  const { normalizePhone } = await import("./config.js");
   return [c.Inbound_Phone, c.Phone, c.Alternate_Phone, c.Mobile, c.Other_Phone, c.Home_Phone]
     .map(p => p ? normalizePhone(p) : null).filter(p => p && p.length === 10);
 }
@@ -283,8 +313,8 @@ app.post("/enroll-cdr/start", async (req, res) => {
       if (enrollPreloadCancelled) { broadcastLog("[EnrollCDR] Cancelled."); break; }
       broadcastLog("[EnrollCDR] Processing " + date + "...");
       try {
-        const { getVoiceSignaturePoliciesByDateRange } = await import("./zoho.js");
-        const policies = await getVoiceSignaturePoliciesByDateRange(date, date);
+        const token = await getEnrollZohoToken();
+        const policies = await getVoiceSigPolicies(date, token);
 
         if (policies.length === 0) {
           broadcastLog("[EnrollCDR] " + date + " — no Voice Signature policies");
@@ -299,7 +329,7 @@ app.post("/enroll-cdr/start", async (req, res) => {
           const contactId = policy.Contact_Name?.id;
           if (!contactId) continue;
           try {
-            const phones = await getContactPhones(contactId);
+            const phones = await getContactPhones(contactId, token);
             phones.forEach(p => clientPhones.add(p));
           } catch (err) {
             broadcastLog("[EnrollCDR] Phone fetch failed for " + policy.Deal_Name + ": " + err.message);
@@ -343,6 +373,38 @@ app.post("/enroll-cdr/start", async (req, res) => {
               }
             } catch (err) {
               broadcastLog("[EnrollCDR] CDR scrape failed for " + enrollNum + ": " + err.message);
+            }
+          }
+
+          // Also scrape by the agent extensions for Humana/UHC policy owners.
+          // This captures ring group inbound calls where the client phone appears
+          // in the destination field but not in normalizedFrom/To.
+          // We look up each owner's extension from the CDRs we already scraped
+          // for the 800 numbers — the agent's extension appears in the from field.
+          const agentExtsToScrape = new Set();
+          for (const r of allRecords) {
+            // 800-number CDRs have agent ext in normalizedFrom
+            if (r.normalizedTo === "8009850245" || r.normalizedTo === "8887252832") {
+              if (r.normalizedFrom && r.normalizedFrom.length <= 4) {
+                agentExtsToScrape.add(r.normalizedFrom);
+              }
+            }
+            // Also grab agentExtension field if present
+            if (r.agentExtension && r.agentExtension !== "350") {
+              agentExtsToScrape.add(r.agentExtension);
+            }
+          }
+          broadcastLog("[EnrollCDR] " + date + " — scraping " + agentExtsToScrape.size + " agent extension(s)");
+          for (const ext of agentExtsToScrape) {
+            if (enrollPreloadCancelled) break;
+            try {
+              const cdrs = await session.scrapeCdrsByPhone(ext, date, date);
+              if (cdrs.length > 0) {
+                allRecords = allRecords.concat(cdrs);
+                broadcastLog("[EnrollCDR] " + date + " — " + cdrs.length + " CDR(s) for agent ext " + ext);
+              }
+            } catch (err) {
+              broadcastLog("[EnrollCDR] CDR scrape failed for agent ext " + ext + ": " + err.message);
             }
           }
         } finally {
