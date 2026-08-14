@@ -83,8 +83,6 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
     log(`[Backfill] Integritel session ready`);
 
     // 3. Process each policy
-    const usedUniqueIds = new Set(); // track uniqueIds already attached this run
-
     for (let i = 0; i < policies.length; i++) {
       if (activeRun.cancelled) {
         log(`[Backfill] ⛔ Cancelled at policy ${i + 1} of ${policies.length}`);
@@ -254,26 +252,28 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
         activeRun.stats.processed++;
 
         // ── Enrollment 3-way call recordings ─────────────────────────────────
-        // Starts from 800-number CDRs, identifies the agent, then finds the
-        // preceding client call by that agent — including ring group inbound calls
-        // by parsing the destination field for the client phone number.
-        // Only Humana (8009850245) and UHC (8887252832) use 3-way enrollment calls.
-        const enrollCarriers = new Set(["United Healthcare", "Humana"]);
-        if (policy.Application_Date && policy.Smoker_Status === "Yes" && enrollCarriers.has(policy.Insurance_Company)) {
+        // Exact same logic as ARCH's processEnrollmentRecordings.
+        // Works FROM the enrollment CDR outward:
+        // 1. Find 800-number CDRs in MongoDB for the application date
+        // 2. Determine agent extension from those CDRs
+        // 3. Look back 2 minutes for a client call involving that agent
+        // 4. If client phone matches this policy's phones → attach the recording
+        if (policy.Application_Date && policy.Smoker_Status === "Yes") {
           const ENROLLMENT_NUMBERS = new Set(["8009850245", "8887252832"]);
+          const WINDOW_MS = 2 * 60 * 1000;
           const { normalizePhone, AGENT_DIDS, AGENT_EXTENSIONS, RING_GROUPS, INBOUND_DIDS } = await import("./config.js");
           const db = await getDb();
           let enrollAttached = 0;
           let enrollSkipped = 0;
 
-          const dayStart = policy.Application_Date + "T00:00:00.000Z";
-          const dayEnd   = policy.Application_Date + "T23:59:59.999Z";
-
-          // Step 1: Find all 800-number CDRs on the application date
+          // Find 800-number CDRs in MongoDB for this policy's application date
           const enrollmentCdrs = await db.collection("cdrs").find({
             status: "Answered",
             durationSeconds: { $gt: 0 },
-            dateTimeIso: { $gte: dayStart, $lte: dayEnd },
+            dateTimeIso: {
+              $gte: policy.Application_Date + "T00:00:00.000Z",
+              $lte: policy.Application_Date + "T23:59:59.999Z",
+            },
             $or: [
               { normalizedTo: "8009850245" },
               { normalizedTo: "8887252832" },
@@ -281,121 +281,112 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
               { normalizedFrom: "8887252832" },
             ],
           }).toArray();
+
           if (enrollmentCdrs.length === 0) {
             log(`[Backfill] ℹ ${policyLabel} — Voice Sig: no enrollment CDRs in cache for ${policy.Application_Date}`);
           } else {
+            log(`[Backfill] 🔍 DEBUG found ${enrollmentCdrs.length} enrollment CDR(s) for ${policy.Application_Date}`);
             for (const enrollCdr of enrollmentCdrs) {
-              // Step 2: Identify the agent from the 800 CDR
-              const eFrom = normalizePhone(enrollCdr.from);
-              const eTo   = normalizePhone(enrollCdr.to);
-              const fromIsEnroll = ENROLLMENT_NUMBERS.has(eFrom);
-              const agentSide = fromIsEnroll ? eTo : eFrom;
-              if (!agentSide) continue;
+              // Determine agent extension — internal side of the 800 call
+              const fromNorm = normalizePhone(enrollCdr.from);
+              const toNorm   = normalizePhone(enrollCdr.to);
+              const fromIsInternal = AGENT_DIDS.has(fromNorm) || AGENT_EXTENSIONS.has(fromNorm) ||
+                                     RING_GROUPS.has(fromNorm) || INBOUND_DIDS.has(fromNorm);
+              const agentExt = fromIsInternal ? fromNorm : toNorm;
 
-              // Step 3: Find the most recent call before this 800 call involving this agent
-              // This includes outbound calls (agent DID in from/to) AND
-              // inbound calls through ring groups (parse destination for client phone)
-              const enrollStart = enrollCdr.dateTimeIso;
+              if (!agentExt) continue;
 
-              // Get all calls involving this agent on this date before the 800 call
-              const precedingCdrs = await db.collection("cdrs").find({
+              // Find the client call the agent was on immediately before dialing the 800 number.
+              const enrollStart = new Date(enrollCdr.dateTimeIso);
+              const lookbackEnd = enrollStart.toISOString();
+
+              // Extract the agent's DID from the enrollment CDR's from field.
+              // The from field looks like "<16363660665>" — normalize it to get the 10-digit DID.
+              const agentDid = normalizePhone(enrollCdr.from);
+
+              // Restrict to the same date as the enrollment call (start of day to 800 call start).
+              const enrollDate = enrollCdr.dateTimeIso.slice(0, 10); // YYYY-MM-DD
+              const dayStart = `${enrollDate}T00:00:00.000Z`;
+
+              // Find client calls by THIS specific agent (by DID or extension) on the same date,
+              // before the 800 call start.
+              const candidates = await db.collection("cdrs").find({
                 status: "Answered",
-                dateTimeIso: { $gte: dayStart, $lt: enrollStart },
+                durationSeconds: { $gt: 0 },
+                dateTimeIso: { $gte: dayStart, $lte: lookbackEnd },
                 $or: [
-                  { normalizedFrom: agentSide },
-                  { normalizedTo: agentSide },
-                  { agentExtension: agentSide },
+                  { normalizedFrom: agentDid },
+                  { normalizedTo: agentDid },
+                  { normalizedFrom: agentExt },
+                  { normalizedTo: agentExt },
                 ],
-              }).sort({ dateTimeIso: -1 }).limit(10).toArray();
+              }).toArray();
 
-              // Step 4: Extract client phone from each preceding CDR
-              // For outbound calls: other side is the client
-              // For ring group inbound: parse client phone from destination field
-              let clientPhone = null;
-              for (const preCdr of precedingCdrs) {
-                const pFrom = normalizePhone(preCdr.from);
-                const pTo   = normalizePhone(preCdr.to);
-                const fromIsAgent = AGENT_DIDS.has(pFrom) || AGENT_EXTENSIONS.has(pFrom) || RING_GROUPS.has(pFrom);
-                const toIsAgent   = AGENT_DIDS.has(pTo)   || AGENT_EXTENSIONS.has(pTo)   || RING_GROUPS.has(pTo);
+              // Filter: find calls where one side is the agent (by extension OR DID)
+              // and the other side is an external customer phone.
+              // CDRs scraped by client phone have agent DIDs, not extensions — so check both.
+              const clientCdrs = candidates.filter(c => {
+                const cFrom = normalizePhone(c.from);
+                const cTo   = normalizePhone(c.to);
+                if (!cFrom || !cTo) return false;
+                if (ENROLLMENT_NUMBERS.has(cFrom) || ENROLLMENT_NUMBERS.has(cTo)) return false;
+                if (!c.dateTimeIso || !c.durationSeconds) return false;
 
-                let candidate = null;
-                if (fromIsAgent && !toIsAgent && pTo && pTo.length === 10) {
-                  candidate = pTo; // outbound: agent called client
-                } else if (!fromIsAgent && toIsAgent && pFrom && pFrom.length === 10) {
-                  candidate = pFrom; // inbound: client called agent directly
-                } else if (toIsAgent || RING_GROUPS.has(pTo)) {
-                  // Ring group inbound — parse client phone from destination field
-                  if (preCdr.destination) {
-                    const destMatch = preCdr.destination.match(/\+?1?(\d{10})/);
-                    if (destMatch) candidate = destMatch[1].slice(-10);
-                  }
-                  // Also try normalizedFrom if it's a 10-digit external number
-                  if (!candidate && pFrom && pFrom.length === 10 &&
-                      !AGENT_DIDS.has(pFrom) && !AGENT_EXTENSIONS.has(pFrom) &&
-                      !RING_GROUPS.has(pFrom) && !INBOUND_DIDS.has(pFrom) &&
-                      !ENROLLMENT_NUMBERS.has(pFrom)) {
-                    candidate = pFrom;
-                  }
-                }
+                // Determine which side is the agent and which is the customer
+                const fromIsAgent = AGENT_EXTENSIONS.has(cFrom) || AGENT_DIDS.has(cFrom) || RING_GROUPS.has(cFrom);
+                const toIsAgent   = AGENT_EXTENSIONS.has(cTo)   || AGENT_DIDS.has(cTo)   || RING_GROUPS.has(cTo);
 
-                if (!candidate) continue;
-                if (INBOUND_DIDS.has(candidate) || ENROLLMENT_NUMBERS.has(candidate)) continue;
+                if (!fromIsAgent && !toIsAgent) return false; // neither side is an agent
+                if (fromIsAgent && toIsAgent) return false;   // purely internal call
 
-                // Check if this candidate phone belongs to this policy
-                if (phones.includes(candidate)) {
-                  clientPhone = candidate;
-                  break;
-                }
-              }
+                const otherSide = fromIsAgent ? cTo : cFrom;
+                if (!otherSide || otherSide.length !== 10) return false;
 
-              // Fallback: if no preceding CDR found, check ring group CDRs
-              // where the destination field contains one of this policy's phones.
-              // This catches inbound calls through ring groups where the agent extension
-              // doesn't appear in normalizedFrom/normalizedTo.
-              if (!clientPhone) {
-                const ringGroupCdrs = await db.collection("cdrs").find({
-                  status: "Answered",
-                  dateTimeIso: { $gte: dayStart, $lt: enrollStart },
-                  $or: phones.flatMap(p => [
-                    { destination: { $regex: p } },
-                  ]),
-                }).sort({ dateTimeIso: -1 }).limit(5).toArray();
-                for (const rgCdr of ringGroupCdrs) {
-                  const rgFrom = normalizePhone(rgCdr.from);
-                  const rgTo   = normalizePhone(rgCdr.to);
-                  // Must involve the ring group on one side and the specific enrollment agent on the other
-                  const hasRingGroup = RING_GROUPS.has(rgFrom) || RING_GROUPS.has(rgTo);
-                  const hasAgent = rgFrom === agentSide || rgTo === agentSide ||
-                                   rgCdr.agentExtension === agentSide;
-                  if (!hasRingGroup || !hasAgent) continue;
-                  // Check destination field contains one of our policy phones
-                  const destText = rgCdr.destination || "";
-                  const matchedPhone = phones.find(p => destText.includes(p));
-                  if (matchedPhone) {
-                    clientPhone = matchedPhone;
-                    break;
-                  }
-                }
-              }
+                // Other side must not be an inbound DID or enrollment number
+                if (INBOUND_DIDS.has(otherSide) || ENROLLMENT_NUMBERS.has(otherSide)) return false;
 
-              if (!clientPhone) continue;
+                // Must be at least 60 seconds — ignore short/dropped calls
+                if (c.durationSeconds < 60) return false;
 
-              // Skip if this enrollment recording was already attached to another policy this run
-              if (usedUniqueIds.has(enrollCdr.uniqueId)) {
-                log(`[Backfill] ↩ ${policyLabel} — enrollment CDR ${enrollCdr.uniqueId} already attached this run, skipping`);
+                // The phone match below (phones.includes(clientPhone)) ensures
+                // we only attach to the correct policy — no need to match agent identity here
+                return true;
+              });
+
+              log(`[Backfill] 🔍 DEBUG enrollCdr from=${enrollCdr.from} to=${enrollCdr.to} agentExt=${agentExt} agentDid=${agentDid} before=${lookbackEnd} candidates=${candidates.length} clientCdrs=${clientCdrs.length}`);
+              clientCdrs.forEach((c, i) => {
+                log(`[Backfill] 🔍 DEBUG   clientCdr[${i}] from=${c.from} to=${c.to} dateTimeIso=${c.dateTimeIso} duration=${c.durationSeconds}s normalizedFrom=${c.normalizedFrom} normalizedTo=${c.normalizedTo}`);
+              });
+
+              if (clientCdrs.length === 0) continue;
+
+              // Take the client call that started most recently before the 800 call —
+              // that's the call the agent was on immediately before dialing the enrollment number.
+              clientCdrs.sort((a, b) => {
+                return new Date(b.dateTimeIso) - new Date(a.dateTimeIso);
+              });
+
+              const clientCdr = clientCdrs[0];
+              const cFrom = normalizePhone(clientCdr.from);
+              const cTo   = normalizePhone(clientCdr.to);
+              const fromIsAgent = AGENT_EXTENSIONS.has(cFrom) || AGENT_DIDS.has(cFrom) || RING_GROUPS.has(cFrom);
+              const clientPhone = fromIsAgent ? cTo : cFrom;
+
+              // Only attach if this client phone belongs to THIS policy's contact
+              log(`[Backfill] 🔍 DEBUG clientPhone=${clientPhone} policy phones=${JSON.stringify(phones)}`);
+              if (!phones.includes(clientPhone)) {
+                log(`[Backfill] 🔍 DEBUG phone mismatch — ${clientPhone} not in policy phones`);
                 continue;
               }
 
-              log(`[Backfill] 📞 ${policyLabel} — enrollment match: client ${clientPhone}, 800 call ${enrollCdr.to || enrollCdr.from}`);
+              log(`[Backfill] 📞 ${policyLabel} — enrollment match: agent ${agentExt}, client ${clientPhone}`);
 
-              // Get recordsId — use stored one or scrape by destination number
+              // Get recordsId — use stored one or scrape by agent extension
               let recordsId = enrollCdr.recordsId || await getRecordsId(enrollCdr.uniqueId);
               if (!recordsId) {
                 try {
-                  const eDate = (enrollCdr.dateTimeIso || "").split("T")[0];
-                  const destPhone = enrollCdr.normalizedTo === "8009850245" || enrollCdr.normalizedTo === "8887252832"
-                    ? enrollCdr.normalizedTo : enrollCdr.normalizedFrom;
-                  const mappings = await session.scrapeRecordsIdsByPhone(destPhone, eDate, eDate);
+                  const enrollDate = (enrollCdr.dateTimeIso || "").split("T")[0];
+                  const mappings = await session.scrapeRecordsIdsByPhone(agentExt, enrollDate, enrollDate);
                   if (mappings.length > 0) {
                     await storeRecordsIds(mappings);
                     const match = mappings.find(m => m.uniqueId === enrollCdr.uniqueId);
@@ -413,11 +404,10 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                 const result = await attachRecordingToZoho("Potentials", policy.id, enrollCdr.uniqueId, null, policy.Deal_Name, session);
                 if (result.skipped) {
                   enrollSkipped++;
-                  log(`[Backfill] ↩ ${policyLabel} — enrollment recording already attached, skipping`);
+                  log(`[Backfill] 🔵 ${policyLabel} — enrollment recording previously attached`);
                 } else {
                   enrollAttached++;
                   activeRun.stats.attached++;
-                  usedUniqueIds.add(enrollCdr.uniqueId);
                   log(`[Backfill] 📞 ${policyLabel} — enrollment recording attached ✅`);
                 }
               } catch (err) {
@@ -430,9 +420,9 @@ export async function runBackfill({ startDate, endDate, onLog, resumeRunId = nul
                   uniqueId: enrollCdr.uniqueId, error: err.message,
                   failedAt: new Date(), type: "enrollment",
                 });
-              } // end attach try/catch
-            } // end for enrollCdr
-          } // end else
+              }
+            }
+          }
 
           if (enrollAttached > 0) policyAttached += enrollAttached;
           if (enrollSkipped > 0) policySkipped += enrollSkipped;
