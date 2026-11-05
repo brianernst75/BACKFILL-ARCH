@@ -1,9 +1,35 @@
 import { chromium } from "playwright-core";
+import { getDb } from "./db.js";
 
 const BASE_URL = process.env.INTEGRITEL_DOMAIN?.replace(/\/$/, "") || "https://voice.integritel.com";
 const EMAIL    = process.env.INTEGRITEL_EMAIL;
 const PASSWORD = process.env.INTEGRITEL_PASSWORD;
 const SERVER   = process.env.INTEGRITEL_TENANT_ID || "29";
+
+// ─── Saved-session login (read-only) ─────────────────────────────────────────
+// Integritel now needs a 2-step code at login, so this project never logs in.
+// ARCH logs in and saves the session in MongoDB (database "arch", collection
+// "integritel_auth", document _id "session", field "cookieHeader").
+// This project only READS that saved session. Set INTEGRITEL_USE_PASSWORD_LOGIN=true
+// to bring back the old email + password browser login (off by default).
+const USE_PASSWORD_LOGIN = process.env.INTEGRITEL_USE_PASSWORD_LOGIN === "true";
+const SESSION_MISSING_MSG = "No saved Integritel session found. Log in from ARCH, then run again.";
+const SESSION_EXPIRED_MSG = "Integritel session expired. Log in from ARCH, then run again.";
+
+// Returns the saved cookie text, or null if there isn't one. Never prints it.
+async function loadSavedCookie() {
+  const db = await getDb();
+  const doc = await db.collection("integritel_auth").findOne({ _id: "session" });
+  const cookie = doc?.cookieHeader;
+  return typeof cookie === "string" && cookie.length > 0 ? cookie : null;
+}
+
+// Same as above but throws the clear "log in from ARCH" message when missing.
+async function requireSavedCookie() {
+  const cookie = await loadSavedCookie();
+  if (!cookie) throw new Error(SESSION_MISSING_MSG);
+  return cookie;
+}
 
 async function getBrowser() {
   return chromium.launch({
@@ -72,6 +98,20 @@ export class IntegritelSession {
   }
 
   async init() {
+    if (!USE_PASSWORD_LOGIN) {
+      // Read-only mode: no browser, no login. Use the session ARCH saved.
+      this.cookieHeader = await requireSavedCookie();
+      const check = await fetch(BASE_URL + "/", {
+        headers: this.getHeaders(),
+        redirect: "follow",
+      });
+      const body = await check.text();
+      if (body.includes('name="sm_int_login"')) {
+        throw new Error(SESSION_EXPIRED_MSG);
+      }
+      console.log("[Integritel] Saved session loaded from MongoDB (read-only, no login)");
+      return;
+    }
     // Wait for any existing browser session to finish before starting
     await new Promise(resolve => {
       browserQueue = browserQueue.finally(resolve);
@@ -81,6 +121,18 @@ export class IntegritelSession {
   }
 
   async _login() {
+    if (!USE_PASSWORD_LOGIN) {
+      // Read-only mode: never log in. Look for a newer saved session from ARCH.
+      // If there isn't one (or it is the same one that just failed), stop.
+      const fresh = await loadSavedCookie();
+      if (!fresh || fresh === this.cookieHeader) {
+        throw new Error(SESSION_EXPIRED_MSG);
+      }
+      this.cookieHeader = fresh;
+      this.loginCount++;
+      console.log("[Integritel] Picked up a newer saved session from MongoDB");
+      return;
+    }
     // Reopen browser if it was closed
     if (!this.browser) {
       this.browser = await getBrowser();
@@ -317,11 +369,16 @@ export async function scrapeRecordsIdsByPhone(phone, startDate, endDate) {
 }
 
 export async function scrapeRecordsIds(date) {
-  const browser = await getBrowser();
+  const browser = USE_PASSWORD_LOGIN ? await getBrowser() : null;
   try {
-    const page = await getAuthenticatedPage(browser);
-    const cookies = await page.context().cookies();
-    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
+    let cookieHeader;
+    if (USE_PASSWORD_LOGIN) {
+      const page = await getAuthenticatedPage(browser);
+      const cookies = await page.context().cookies();
+      cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
+    } else {
+      cookieHeader = await requireSavedCookie();
+    }
 
     const headers = {
       "Cookie": cookieHeader,
@@ -369,17 +426,25 @@ export async function scrapeRecordsIds(date) {
     console.log(`[Integritel] Total mappings found for ${date}: ${allMappings.length}`);
     return allMappings;
   } finally {
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
 export async function scrapeRawHtml(date) {
-  const browser = await getBrowser();
+  const browser = USE_PASSWORD_LOGIN ? await getBrowser() : null;
   try {
-    const page = await getAuthenticatedPage(browser);
-    const cookies = await page.context().cookies();
-    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
-    console.log("[Integritel] Got cookies:", cookies.map(c => c.name).join(", "));
+    let cookieHeader;
+    let cookieNames;
+    if (USE_PASSWORD_LOGIN) {
+      const page = await getAuthenticatedPage(browser);
+      const cookies = await page.context().cookies();
+      cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
+      cookieNames = cookies.map(c => c.name);
+    } else {
+      cookieHeader = await requireSavedCookie();
+      cookieNames = cookieHeader.split(";").map(s => s.split("=")[0].trim()).filter(Boolean);
+    }
+    console.log("[Integritel] Got cookies:", cookieNames.join(", "));
 
     const filterRaw = `${date}|${date}|tx|8|destination|| |00:00:00|23:59:59||destination||uniqueid||`;
     const filter = Buffer.from(filterRaw).toString("base64");
@@ -402,7 +467,7 @@ export async function scrapeRawHtml(date) {
       htmlLength: html.length,
       containsRowData: html.includes("cdr_rec_click"),
       containsRowId: html.includes('id="row_'),
-      cookies: cookies.map(c => c.name),
+      cookies: cookieNames,
       htmlPreview: html.slice(0, 2000),
       htmlEnd: html.slice(-3000),
       paginationSearch: {
@@ -416,7 +481,7 @@ export async function scrapeRawHtml(date) {
     console.error("[Integritel] scrapeRawHtml error:", err.message);
     throw err;
   } finally {
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
